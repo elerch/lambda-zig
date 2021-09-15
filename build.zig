@@ -1,4 +1,5 @@
 const std = @import("std");
+const pkgs = @import("deps.zig").pkgs;
 
 pub fn build(b: *std.build.Builder) void {
     // Standard target options allows the person running `zig build` to choose
@@ -11,7 +12,8 @@ pub fn build(b: *std.build.Builder) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
-    const exe = b.addExecutable("lambda-zig", "src/main.zig");
+    const exe = b.addExecutable("bootstrap", "src/main.zig");
+    pkgs.addAllTo(exe);
     exe.setTarget(target);
     exe.setBuildMode(mode);
     exe.install();
