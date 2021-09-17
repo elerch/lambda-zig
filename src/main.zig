@@ -9,7 +9,7 @@ pub fn main() anyerror!void {
     var client = try requestz.Client.init(allocator);
     defer client.deinit();
 
-    var response = try client.get("http://httpbin.org/get", .{});
+    var response = try client.get("http://captive.lerch.org/", .{});
     std.log.info("{s}", .{response.body});
     defer response.deinit();
 }

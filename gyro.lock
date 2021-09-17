@@ -1,5 +1,5 @@
 pkg default ducdetronquito http 0.1.3
-pkg default ducdetronquito requestz 0.1.1
 pkg default ducdetronquito h11 0.1.1
-github alexnask iguanaTLS 0d39a361639ad5469f8e4dcdaea35446bbe54b48 src/main.zig 0d39a361639ad5469f8e4dcdaea35446bbe54b48
-github MasterQ32 zig-network b9c91769d8ebd626c8e45b2abb05cbc28ccc50da network.zig b9c91769d8ebd626c8e45b2abb05cbc28ccc50da
+github nektro iguanaTLS 953ad821fae6c920fb82399493663668cd91bde7 src/main.zig 953ad821fae6c920fb82399493663668cd91bde7
+github MasterQ32 zig-network 15b88658809cac9022ec7d59449b0cd3ebfd0361 network.zig 15b88658809cac9022ec7d59449b0cd3ebfd0361
+github elerch requestz 1fa8157641300805b9503f98cd201d0959d19631 src/main.zig 1fa8157641300805b9503f98cd201d0959d19631
