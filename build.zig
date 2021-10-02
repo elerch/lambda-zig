@@ -61,28 +61,30 @@ pub fn build(b: *std.build.Builder) !void {
             // directory to be used later
             const iam_role_name_file = b.getInstallPath(exe.install_step.?.dest_dir, "iam_role_name");
             iam_role = try std.fmt.allocPrint(b.allocator, "--role $(cat {s})", .{iam_role_name_file});
+            // defer b.allocator.free(iam_role);
+            if (!fileExists(iam_role_name_file)) {
+                // Role get/creation command
+                const ifstatement_fmt =
+                    \\ if aws iam get-role --role-name lambda_basic_execution 2>&1 |grep -q NoSuchEntity; then aws iam create-role --output text --query Role.Arn --role-name lambda_basic_execution --assume-role-policy-document '{
+                    \\ "Version": "2012-10-17",
+                    \\ "Statement": [
+                    \\   {
+                    \\     "Sid": "",
+                    \\     "Effect": "Allow",
+                    \\     "Principal": {
+                    \\       "Service": "lambda.amazonaws.com"
+                    \\     },
+                    \\     "Action": "sts:AssumeRole"
+                    \\   }
+                    \\ ]}' > /dev/null; fi && \
+                    \\ aws iam attach-role-policy --policy-arn arn:aws:iam::aws:policy/AWSLambdaExecute --role-name lambda_basic_execution && \
+                    \\ aws iam get-role --role-name lambda_basic_execution --query Role.Arn --output text > 
+                ;
 
-            // Role get/creation command
-            const ifstatement_fmt =
-                \\ if aws iam get-role --role-name lambda_basic_execution 2>&1 |grep -q NoSuchEntity; then aws iam create-role --output text --query Role.Arn --role-name lambda_basic_execution --assume-role-policy-document '{
-                \\ "Version": "2012-10-17",
-                \\ "Statement": [
-                \\   {
-                \\     "Sid": "",
-                \\     "Effect": "Allow",
-                \\     "Principal": {
-                \\       "Service": "lambda.amazonaws.com"
-                \\     },
-                \\     "Action": "sts:AssumeRole"
-                \\   }
-                \\ ]}' > /dev/null; fi && \
-                \\ aws iam attach-role-policy --policy-arn arn:aws:iam::aws:policy/AWSLambdaExecute --role-name lambda_basic_execution && \
-                \\ aws iam get-role --role-name lambda_basic_execution --query Role.Arn --output text > 
-            ;
-
-            const ifstatement = try std.mem.concat(b.allocator, u8, &[_][]const u8{ ifstatement_fmt, iam_role_name_file });
-            defer b.allocator.free(ifstatement);
-            iam_step.dependOn(&b.addSystemCommand(&.{ "/bin/sh", "-c", ifstatement }).step);
+                const ifstatement = try std.mem.concat(b.allocator, u8, &[_][]const u8{ ifstatement_fmt, iam_role_name_file });
+                defer b.allocator.free(ifstatement);
+                iam_step.dependOn(&b.addSystemCommand(&.{ "/bin/sh", "-c", ifstatement }).step);
+            }
         }
         const function_name = b.option([]const u8, "function-name", "Function name for Lambda [zig-fn]") orelse "zig-fn";
         const ifstatement = "if aws lambda get-function --function-name {s} 2>&1 |grep -q ResourceNotFoundException; then echo not found > /dev/null; {s}; else echo found > /dev/null; {s}; fi";
@@ -117,6 +119,7 @@ pub fn build(b: *std.build.Builder) !void {
         const run_script =
             \\ f=$(mktemp) && \
             \\ logs=$(aws lambda invoke \
+            \\          --invocation-type RequestResponse \
             \\          --function-name {s} \
             \\          --payload $(echo '{s}'|base64) \
             \\          --log-type Tail \
@@ -137,7 +140,11 @@ pub fn build(b: *std.build.Builder) !void {
         run_step.dependOn(&run_cmd.step);
     }
 }
-
+fn fileExists(file_name: []const u8) bool {
+    const file = std.fs.openFileAbsolute(file_name, .{}) catch return false;
+    defer file.close();
+    return true;
+}
 fn addArgs(allocator: *std.mem.Allocator, original: []const u8, args: [][]const u8) ![]const u8 {
     var rc = original;
     for (args) |arg| {
