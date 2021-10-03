@@ -113,15 +113,21 @@ pub fn build(b: *std.build.Builder) !void {
         deploy_step.dependOn(package_step);
         deploy_step.dependOn(&b.addSystemCommand(&.{ "/bin/sh", "-c", cmd }).step);
 
-        const payload =
-            \\ {"foo": "bar"}"
+        // TODO: Looks like IquanaTLS isn't playing nicely with payloads this small
+        // const payload = b.option([]const u8, "payload", "Lambda payload [{\"foo\":\"bar\"}]") orelse
+        //     \\ {"foo": "bar"}"
+        // ;
+        const payload = b.option([]const u8, "payload", "Lambda payload [{\"foo\":\"bar\", \"baz\": \"qux\"}]") orelse
+            \\ {"foo": "bar", "baz": "qux"}"
         ;
+
         const run_script =
             \\ f=$(mktemp) && \
             \\ logs=$(aws lambda invoke \
+            \\          --cli-binary-format raw-in-base64-out \
             \\          --invocation-type RequestResponse \
             \\          --function-name {s} \
-            \\          --payload $(echo '{s}'|base64) \
+            \\          --payload '{s}' \
             \\          --log-type Tail \
             \\          --query LogResult \
             \\          --output text "$f"  |base64 -d) && \
