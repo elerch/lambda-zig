@@ -18,6 +18,7 @@ pub fn build(b: *std.build.Builder) !void {
     // const mode = b.standardReleaseOptions();
 
     const exe = b.addExecutable("bootstrap", "src/main.zig");
+
     pkgs.addAllTo(exe);
     exe.setTarget(target);
     exe.setBuildMode(.ReleaseSafe);
@@ -87,15 +88,16 @@ pub fn build(b: *std.build.Builder) !void {
             }
         }
         const function_name = b.option([]const u8, "function-name", "Function name for Lambda [zig-fn]") orelse "zig-fn";
-        const ifstatement = "if aws lambda get-function --function-name {s} 2>&1 |grep -q ResourceNotFoundException; then echo not found > /dev/null; {s}; else echo found > /dev/null; {s}; fi";
+        const function_name_file = b.getInstallPath(exe.install_step.?.dest_dir, function_name);
+        const ifstatement = "if [ ! -f {s} ] || [ {s} -nt {s} ]; then if aws lambda get-function --function-name {s} 2>&1 |grep -q ResourceNotFoundException; then echo not found > /dev/null; {s}; else echo found > /dev/null; {s}; fi; fi";
         // The architectures option was introduced in 2.2.43 released 2021-10-01
         // We want to use arm64 here because it is both faster and cheaper for most
         // Amazon Linux 2 is the only arm64 supported option
-        const not_found = "aws lambda create-function --architectures arm64 --runtime provided.al2 --function-name {s} --zip-file fileb://{s} --handler not_applicable {s}";
-        const not_found_fmt = try std.fmt.allocPrint(b.allocator, not_found, .{ function_name, function_zip, iam_role });
+        const not_found = "aws lambda create-function --architectures arm64 --runtime provided.al2 --function-name {s} --zip-file fileb://{s} --handler not_applicable {s} && touch {s}";
+        const not_found_fmt = try std.fmt.allocPrint(b.allocator, not_found, .{ function_name, function_zip, iam_role, function_name_file });
         defer b.allocator.free(not_found_fmt);
-        const found = "aws lambda update-function-code --function-name {s} --zip-file fileb://{s}";
-        const found_fmt = try std.fmt.allocPrint(b.allocator, found, .{ function_name, function_zip });
+        const found = "aws lambda update-function-code --function-name {s} --zip-file fileb://{s} && touch {s}";
+        const found_fmt = try std.fmt.allocPrint(b.allocator, found, .{ function_name, function_zip, function_name_file });
         defer b.allocator.free(found_fmt);
         var found_final: []const u8 = undefined;
         var not_found_final: []const u8 = undefined;
@@ -106,7 +108,15 @@ pub fn build(b: *std.build.Builder) !void {
             found_final = found_fmt;
             not_found_final = not_found_fmt;
         }
-        const cmd = try std.fmt.allocPrint(b.allocator, ifstatement, .{ function_name, not_found_fmt, found_fmt });
+        const cmd = try std.fmt.allocPrint(b.allocator, ifstatement, .{
+            function_name_file,
+            exe.root_src.?.path,
+            function_name_file,
+            function_name,
+            not_found_fmt,
+            found_fmt,
+        });
+
         defer b.allocator.free(cmd);
 
         // std.debug.print("{s}\n", .{cmd});
