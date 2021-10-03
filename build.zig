@@ -22,7 +22,8 @@ pub fn build(b: *std.build.Builder) !void {
     pkgs.addAllTo(exe);
     exe.setTarget(target);
     exe.setBuildMode(.ReleaseSafe);
-    exe.strip = true;
+    const debug = b.option(bool, "debug", "Debug mode (do not strip executable)") orelse false;
+    exe.strip = !debug;
     exe.install();
 
     // TODO: We can cross-compile of course, but stripping and zip commands
@@ -33,7 +34,10 @@ pub fn build(b: *std.build.Builder) !void {
         package_step.dependOn(b.getInstallStep());
         // strip may not be installed or work for the target arch
         // TODO: make this much less fragile
-        const strip = try std.fmt.allocPrint(b.allocator, "[ -x /usr/aarch64-linux-gnu/bin/strip ] && /usr/aarch64-linux-gnu/bin/strip {s}", .{b.getInstallPath(exe.install_step.?.dest_dir, exe.install_step.?.artifact.out_filename)});
+        const strip = if (debug)
+            try std.fmt.allocPrint(b.allocator, "true", .{})
+        else
+            try std.fmt.allocPrint(b.allocator, "[ -x /usr/aarch64-linux-gnu/bin/strip ] && /usr/aarch64-linux-gnu/bin/strip {s}", .{b.getInstallPath(exe.install_step.?.dest_dir, exe.install_step.?.artifact.out_filename)});
         defer b.allocator.free(strip);
         package_step.dependOn(&b.addSystemCommand(&.{ "/bin/sh", "-c", strip }).step);
         const function_zip = b.getInstallPath(exe.install_step.?.dest_dir, "function.zip");
