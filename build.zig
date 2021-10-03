@@ -110,7 +110,7 @@ pub fn build(b: *std.build.Builder) !void {
         }
         const cmd = try std.fmt.allocPrint(b.allocator, ifstatement, .{
             function_name_file,
-            exe.root_src.?.path,
+            std.fs.path.dirname(exe.root_src.?.path),
             function_name_file,
             function_name,
             not_found_fmt,
