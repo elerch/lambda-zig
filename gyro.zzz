@@ -1,7 +1,0 @@
-deps:
-  requestz:
-    src:
-      github:
-        user: elerch
-        repo: requestz
-        ref: 1fa8157641300805b9503f98cd201d0959d19631

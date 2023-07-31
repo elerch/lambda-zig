@@ -1,26 +1,30 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const pkgs = @import("deps.zig").pkgs;
+const GitRepoStep = @import("GitRepoStep.zig");
+const CopyStep = @import("CopyStep.zig");
 
 pub fn build(b: *std.build.Builder) !void {
-    // Standard target options allows the person running `zig build` to choose
-    // what target to build for. Here we do not override the defaults, which
-    // means any target is allowed, and the default is native. Other options
-    // for restricting supported target set are available.
-    // We want the target to be aarch64-linux for deploys
-    const target = std.zig.CrossTarget{
-        .cpu_arch = .aarch64,
-        .os_tag = .linux,
-    };
+    const zfetch_repo = GitRepoStep.create(b, .{
+        .url = "https://github.com/truemedian/zfetch",
+        // .branch = "0.1.10", // branch also takes tags. Tag 0.1.10 isn't quite new enough
+        .sha = "271cab5da4d12c8f08e67aa0cd5268da100e52f1",
+    });
 
+    const copy_deps = CopyStep.create(
+        b,
+        "zfetch_deps.zig",
+        "libs/zfetch/deps.zig",
+    );
+    copy_deps.step.dependOn(&zfetch_repo.step);
     // Standard release options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     // const mode = b.standardReleaseOptions();
 
     const exe = b.addExecutable("bootstrap", "src/main.zig");
 
-    pkgs.addAllTo(exe);
-    exe.setTarget(target);
+    exe.step.dependOn(&copy_deps.step);
+    exe.addPackage(getZfetchPackage(b, "libs/zfetch") catch unreachable);
+
     exe.setBuildMode(.ReleaseSafe);
     const debug = b.option(bool, "debug", "Debug mode (do not strip executable)") orelse false;
     exe.strip = !debug;
@@ -28,7 +32,7 @@ pub fn build(b: *std.build.Builder) !void {
 
     // TODO: We can cross-compile of course, but stripping and zip commands
     // may vary
-    if (std.builtin.os.tag == .linux) {
+    if (builtin.os.tag == .linux) {
         // Package step
         const package_step = b.step("package", "Package the function");
         package_step.dependOn(b.getInstallStep());
@@ -165,10 +169,46 @@ fn fileExists(file_name: []const u8) bool {
     defer file.close();
     return true;
 }
-fn addArgs(allocator: *std.mem.Allocator, original: []const u8, args: [][]const u8) ![]const u8 {
+fn addArgs(allocator: std.mem.Allocator, original: []const u8, args: [][]const u8) ![]const u8 {
     var rc = original;
     for (args) |arg| {
         rc = try std.mem.concat(allocator, u8, &.{ rc, " ", arg });
     }
     return rc;
+}
+
+fn getDependency(comptime lib_prefix: []const u8, comptime name: []const u8, comptime root: []const u8) !std.build.Pkg {
+    const path = lib_prefix ++ "/libs/" ++ name ++ "/" ++ root;
+
+    // We don't actually care if the dependency has been checked out, as
+    // GitRepoStep will handle that for us
+    // Make sure that the dependency has been checked out.
+    // std.fs.cwd().access(path, .{}) catch |err| switch (err) {
+    //     error.FileNotFound => {
+    //         std.log.err("zfetch: dependency '{s}' not checked out", .{name});
+    //
+    //         return err;
+    //     },
+    //     else => return err,
+    // };
+
+    return std.build.Pkg{
+        .name = name,
+        .path = .{ .path = path },
+    };
+}
+
+pub fn getZfetchPackage(b: *std.build.Builder, comptime lib_prefix: []const u8) !std.build.Pkg {
+    var dependencies = b.allocator.alloc(std.build.Pkg, 4) catch unreachable;
+
+    dependencies[0] = try getDependency(lib_prefix, "iguanaTLS", "src/main.zig");
+    dependencies[1] = try getDependency(lib_prefix, "network", "network.zig");
+    dependencies[2] = try getDependency(lib_prefix, "uri", "uri.zig");
+    dependencies[3] = try getDependency(lib_prefix, "hzzp", "src/main.zig");
+
+    return std.build.Pkg{
+        .name = "zfetch",
+        .path = .{ .path = lib_prefix ++ "/src/main.zig" },
+        .dependencies = dependencies,
+    };
 }
