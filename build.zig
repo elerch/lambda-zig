@@ -1,34 +1,24 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const GitRepoStep = @import("GitRepoStep.zig");
-const CopyStep = @import("CopyStep.zig");
 
 pub fn build(b: *std.build.Builder) !void {
-    const zfetch_repo = GitRepoStep.create(b, .{
-        .url = "https://github.com/truemedian/zfetch",
-        // .branch = "0.1.10", // branch also takes tags. Tag 0.1.10 isn't quite new enough
-        .sha = "271cab5da4d12c8f08e67aa0cd5268da100e52f1",
-    });
-
-    const copy_deps = CopyStep.create(
-        b,
-        "zfetch_deps.zig",
-        "libs/zfetch/deps.zig",
-    );
-    copy_deps.step.dependOn(&zfetch_repo.step);
     // Standard release options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     // const mode = b.standardReleaseOptions();
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
 
-    const exe = b.addExecutable("bootstrap", "src/main.zig");
+    const exe = b.addExecutable(.{
+        .name = "bootstrap",
+        .root_source_file = .{ .path = "src/main.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
 
-    exe.step.dependOn(&copy_deps.step);
-    exe.addPackage(getZfetchPackage(b, "libs/zfetch") catch unreachable);
-
-    exe.setBuildMode(.ReleaseSafe);
+    // exe.setBuildMode(.ReleaseSafe); // TODO: ReleaseSmall is stripped. Maybe best to just leave this to user
     const debug = b.option(bool, "debug", "Debug mode (do not strip executable)") orelse false;
     exe.strip = !debug;
-    exe.install();
+    b.installArtifact(exe);
 
     // TODO: We can cross-compile of course, but stripping and zip commands
     // may vary
@@ -36,16 +26,10 @@ pub fn build(b: *std.build.Builder) !void {
         // Package step
         const package_step = b.step("package", "Package the function");
         package_step.dependOn(b.getInstallStep());
-        // strip may not be installed or work for the target arch
-        // TODO: make this much less fragile
-        const strip = if (debug)
-            try std.fmt.allocPrint(b.allocator, "true", .{})
-        else
-            try std.fmt.allocPrint(b.allocator, "[ -x /usr/aarch64-linux-gnu/bin/strip ] && /usr/aarch64-linux-gnu/bin/strip {s}", .{b.getInstallPath(exe.install_step.?.dest_dir, exe.install_step.?.artifact.out_filename)});
-        defer b.allocator.free(strip);
-        package_step.dependOn(&b.addSystemCommand(&.{ "/bin/sh", "-c", strip }).step);
-        const function_zip = b.getInstallPath(exe.install_step.?.dest_dir, "function.zip");
-        const zip = try std.fmt.allocPrint(b.allocator, "zip -qj9 {s} {s}", .{ function_zip, b.getInstallPath(exe.install_step.?.dest_dir, exe.install_step.?.artifact.out_filename) });
+        // const function_zip = b.getInstallPath(exe.installed_path.?, "function.zip");
+        const function_zip = b.getInstallPath(.bin, "function.zip");
+        // TODO: https://github.com/hdorio/hwzip.zig/blob/master/src/hwzip.zig
+        const zip = try std.fmt.allocPrint(b.allocator, "zip -qj9 {s} {s}", .{ function_zip, b.getInstallPath(.bin, exe.out_filename) });
         defer b.allocator.free(zip);
         package_step.dependOn(&b.addSystemCommand(&.{ "/bin/sh", "-c", zip }).step);
 
@@ -68,7 +52,7 @@ pub fn build(b: *std.build.Builder) !void {
             // need to do anything with the iam role. Otherwise, we'll create/
             // get the IAM role and stick the name in a file in our destination
             // directory to be used later
-            const iam_role_name_file = b.getInstallPath(exe.install_step.?.dest_dir, "iam_role_name");
+            const iam_role_name_file = b.getInstallPath(.bin, "iam_role_name");
             iam_role = try std.fmt.allocPrint(b.allocator, "--role $(cat {s})", .{iam_role_name_file});
             // defer b.allocator.free(iam_role);
             if (!fileExists(iam_role_name_file)) {
@@ -96,7 +80,7 @@ pub fn build(b: *std.build.Builder) !void {
             }
         }
         const function_name = b.option([]const u8, "function-name", "Function name for Lambda [zig-fn]") orelse "zig-fn";
-        const function_name_file = b.getInstallPath(exe.install_step.?.dest_dir, function_name);
+        const function_name_file = b.getInstallPath(.bin, function_name);
         const ifstatement = "if [ ! -f {s} ] || [ {s} -nt {s} ]; then if aws lambda get-function --function-name {s} 2>&1 |grep -q ResourceNotFoundException; then echo not found > /dev/null; {s}; else echo found > /dev/null; {s}; fi; fi";
         // The architectures option was introduced in 2.2.43 released 2021-10-01
         // We want to use arm64 here because it is both faster and cheaper for most
@@ -118,7 +102,7 @@ pub fn build(b: *std.build.Builder) !void {
         }
         const cmd = try std.fmt.allocPrint(b.allocator, ifstatement, .{
             function_name_file,
-            std.fs.path.dirname(exe.root_src.?.path),
+            std.fs.path.dirname(exe.root_src.?.path).?,
             function_name_file,
             function_name,
             not_found_fmt,
@@ -162,6 +146,8 @@ pub fn build(b: *std.build.Builder) !void {
 
         const run_step = b.step("run", "Run the app");
         run_step.dependOn(&run_cmd.step);
+
+        // TODO: Add test
     }
 }
 fn fileExists(file_name: []const u8) bool {
@@ -175,40 +161,4 @@ fn addArgs(allocator: std.mem.Allocator, original: []const u8, args: [][]const u
         rc = try std.mem.concat(allocator, u8, &.{ rc, " ", arg });
     }
     return rc;
-}
-
-fn getDependency(comptime lib_prefix: []const u8, comptime name: []const u8, comptime root: []const u8) !std.build.Pkg {
-    const path = lib_prefix ++ "/libs/" ++ name ++ "/" ++ root;
-
-    // We don't actually care if the dependency has been checked out, as
-    // GitRepoStep will handle that for us
-    // Make sure that the dependency has been checked out.
-    // std.fs.cwd().access(path, .{}) catch |err| switch (err) {
-    //     error.FileNotFound => {
-    //         std.log.err("zfetch: dependency '{s}' not checked out", .{name});
-    //
-    //         return err;
-    //     },
-    //     else => return err,
-    // };
-
-    return std.build.Pkg{
-        .name = name,
-        .path = .{ .path = path },
-    };
-}
-
-pub fn getZfetchPackage(b: *std.build.Builder, comptime lib_prefix: []const u8) !std.build.Pkg {
-    var dependencies = b.allocator.alloc(std.build.Pkg, 4) catch unreachable;
-
-    dependencies[0] = try getDependency(lib_prefix, "iguanaTLS", "src/main.zig");
-    dependencies[1] = try getDependency(lib_prefix, "network", "network.zig");
-    dependencies[2] = try getDependency(lib_prefix, "uri", "uri.zig");
-    dependencies[3] = try getDependency(lib_prefix, "hzzp", "src/main.zig");
-
-    return std.build.Pkg{
-        .name = "zfetch",
-        .path = .{ .path = lib_prefix ++ "/src/main.zig" },
-        .dependencies = dependencies,
-    };
 }
