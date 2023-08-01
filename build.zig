@@ -10,7 +10,7 @@ pub fn build(b: *std.build.Builder) !void {
 
     var exe = b.addExecutable(.{
         .name = "custom",
-        .root_source_file = .{ .path = "src/main.zig" },
+        .root_source_file = .{ .path = "src/sample-main.zig" },
         .target = target,
         .optimize = optimize,
     });
