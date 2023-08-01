@@ -9,15 +9,15 @@ pub fn build(b: *std.build.Builder) !void {
     const optimize = b.standardOptimizeOption(.{});
 
     var exe = b.addExecutable(.{
-        .name = "bootstrap",
+        .name = "custom",
         .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
         .optimize = optimize,
     });
 
-    try lambdaBuildOptions(b, exe);
-
     b.installArtifact(exe);
+
+    try lambdaBuildOptions(b, exe);
 
     // TODO: We can cross-compile of course, but stripping and zip commands
     // may vary
@@ -64,16 +64,35 @@ pub fn lambdaBuildOptions(b: *std.build.Builder, exe: *std.Build.Step.Compile) !
 
     // Package step
     const package_step = b.step("package", "Package the function");
-    package_step.dependOn(b.getInstallStep());
-    // const function_zip = b.getInstallPath(exe.installed_path.?, "function.zip");
     const function_zip = b.getInstallPath(.bin, "function.zip");
 
-    // TODO: allow use of user-specified exe names
     // TODO: Avoid use of system-installed zip, maybe using something like
     // https://github.com/hdorio/hwzip.zig/blob/master/src/hwzip.zig
-    const zip = try std.fmt.allocPrint(b.allocator, "zip -qj9 {s} {s}", .{ function_zip, b.getInstallPath(.bin, exe.out_filename) });
+    const zip = if (std.mem.eql(u8, "bootstrap", exe.out_filename))
+        try std.fmt.allocPrint(b.allocator,
+            \\zip -qj9 {s} {s}
+        , .{
+            function_zip,
+            b.getInstallPath(.bin, "bootstrap"),
+        })
+    else
+        // We need to copy stuff around
+        try std.fmt.allocPrint(b.allocator,
+            \\cp {s} {s} && \
+            \\zip -qj9 {s} {s} && \
+            \\rm {s}
+        , .{
+            b.getInstallPath(.bin, exe.out_filename),
+            b.getInstallPath(.bin, "bootstrap"),
+            function_zip,
+            b.getInstallPath(.bin, "bootstrap"),
+            b.getInstallPath(.bin, "bootstrap"),
+        });
+    // std.debug.print("\nzip cmdline: {s}", .{zip});
     defer b.allocator.free(zip);
-    package_step.dependOn(&b.addSystemCommand(&.{ "/bin/sh", "-c", zip }).step);
+    var zip_cmd = b.addSystemCommand(&.{ "/bin/sh", "-c", zip });
+    zip_cmd.step.dependOn(b.getInstallStep());
+    package_step.dependOn(&zip_cmd.step);
 
     // Deployment
     const deploy_step = b.step("deploy", "Deploy the function");
