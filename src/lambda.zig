@@ -101,8 +101,11 @@ pub fn run(event_handler: HandlerFn) !void { // TODO: remove inferred error set?
         }
         const event_response = event_handler(req_allocator, resp_payload.items) catch |err| {
             // Stack trace will return null if stripped
-            const return_trace = @errorReturnTrace() orelse "no return trace available";
-            std.log.err("Caught error: {}. Return Trace: {s}", .{ err, return_trace });
+            const return_trace = @errorReturnTrace();
+            if (return_trace) |rt|
+                std.log.err("Caught error: {}. Return Trace: {any}", .{ err, rt })
+            else
+                std.log.err("Caught error: {}. No return trace available", .{err});
             const err_url = try std.fmt.allocPrint(req_allocator, "{s}{s}/runtime/invocation/{s}/error", .{ prefix, lambda_runtime_uri, req_id });
             defer req_allocator.free(err_url);
             const err_uri = try std.Uri.parse(err_url);
@@ -110,10 +113,13 @@ pub fn run(event_handler: HandlerFn) !void { // TODO: remove inferred error set?
                 \\  {s}
                 \\    "errorMessage": "{s}",
                 \\    "errorType": "HandlerReturnedError",
-                \\    "stackTrace": [ "{s}" ]
+                \\    "stackTrace": [ "{any}" ]
                 \\  {s}
             ;
-            const content_fmt = try std.fmt.allocPrint(req_allocator, content, .{ "{", @errorName(err), return_trace, "}" });
+            const content_fmt = if (return_trace) |rt|
+                try std.fmt.allocPrint(req_allocator, content, .{ "{", @errorName(err), rt, "}" })
+            else
+                try std.fmt.allocPrint(req_allocator, content, .{ "{", @errorName(err), "no return trace available", "}" });
             defer req_allocator.free(content_fmt);
             std.log.err("Posting to {s}: Data {s}", .{ err_url, content_fmt });
 
