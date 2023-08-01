@@ -52,14 +52,6 @@ fn addArgs(allocator: std.mem.Allocator, original: []const u8, args: [][]const u
 /// deploy depends on iam and package
 ///
 /// iam and package do not have any dependencies
-///
-/// At the moment, there I do not see a way utilize the zig package manager to
-/// add modules for build.zig itself. There is some thinking in this area:
-/// https://github.com/ziglang/zig/issues/8070
-///
-/// But for now I think this is a copy/paste job
-/// TODO: Move this code into another file (temporary)
-/// TODO: Determine a way to use packages within build.zig (permanent)
 pub fn lambdaBuildOptions(b: *std.build.Builder, exe: *std.Build.Step.Compile) !void {
     // The rest of this function is currently reliant on the use of Linux
     // system being used to build the lambda function
