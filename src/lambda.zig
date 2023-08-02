@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const HandlerFn = *const fn (std.mem.Allocator, []const u8) anyerror![]const u8;
 
@@ -9,7 +10,7 @@ const log = std.log.scoped(.lambda);
 pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // TODO: remove inferred error set?
     const prefix = "http://";
     const postfix = "/2018-06-01/runtime/invocation";
-    const lambda_runtime_uri = std.os.getenv("AWS_LAMBDA_RUNTIME_API").?;
+    const lambda_runtime_uri = std.os.getenv("AWS_LAMBDA_RUNTIME_API") orelse test_lambda_runtime_uri.?;
     // TODO: If this is null, go into single use command line mode
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -26,7 +27,12 @@ pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // T
     defer empty_headers.deinit();
     log.info("tid {d} (lambda): Bootstrap initializing with event url: {s}", .{ std.Thread.getCurrentId(), url });
 
-    while (true) {
+    while (lambda_remaining_requests == null or lambda_remaining_requests.? > 0) {
+        if (lambda_remaining_requests) |*r| {
+            // we're under test
+            log.debug("lambda remaining requests: {d}", .{r.*});
+            r.* -= 1;
+        }
         var req_alloc = std.heap.ArenaAllocator.init(alloc);
         defer req_alloc.deinit();
         const req_allocator = req_alloc.allocator();
@@ -184,4 +190,187 @@ pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // T
             continue;
         };
     }
+}
+
+////////////////////////////////////////////////////////////////////////
+// All code below this line is for testing
+////////////////////////////////////////////////////////////////////////
+var server_port: ?u16 = null;
+var server_remaining_requests: usize = 0;
+var lambda_remaining_requests: ?usize = null;
+var server_response: []const u8 = "unset";
+var server_request_aka_lambda_response: []u8 = "";
+var test_lambda_runtime_uri: ?[]u8 = null;
+
+var server_ready = false;
+/// This starts a test server. We're not testing the server itself,
+/// so the main tests will start this thing up and create an arena around the
+/// whole thing so we can just deallocate everything at once at the end,
+/// leaks be damned
+fn startServer(allocator: std.mem.Allocator) !std.Thread {
+    return try std.Thread.spawn(
+        .{},
+        threadMain,
+        .{allocator},
+    );
+}
+
+fn threadMain(allocator: std.mem.Allocator) !void {
+    var server = std.http.Server.init(allocator, .{ .reuse_address = true });
+    // defer server.deinit();
+
+    const address = try std.net.Address.parseIp("127.0.0.1", 0);
+    try server.listen(address);
+    server_port = server.socket.listen_address.in.getPort();
+
+    test_lambda_runtime_uri = try std.fmt.allocPrint(allocator, "127.0.0.1:{d}", .{server_port.?});
+    log.debug("server listening at {s}", .{test_lambda_runtime_uri.?});
+    defer server.deinit();
+    defer test_lambda_runtime_uri = null;
+    defer server_port = null;
+    log.info("starting server thread, tid {d}", .{std.Thread.getCurrentId()});
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var aa = arena.allocator();
+    // We're in control of all requests/responses, so this flag will tell us
+    // when it's time to shut down
+    while (server_remaining_requests > 0) {
+        server_remaining_requests -= 1;
+        // defer {
+        //     if (!arena.reset(.{ .retain_capacity = {} })) {
+        //         // reallocation failed, arena is degraded
+        //         log.warn("Arena reset failed and is degraded. Resetting arena", .{});
+        //         arena.deinit();
+        //         arena = std.heap.ArenaAllocator.init(allocator);
+        //         aa = arena.allocator();
+        //     }
+        // }
+
+        processRequest(aa, &server) catch |e| {
+            log.err("Unexpected error processing request: {any}", .{e});
+            if (@errorReturnTrace()) |trace| {
+                std.debug.dumpStackTrace(trace.*);
+            }
+        };
+    }
+}
+
+fn processRequest(allocator: std.mem.Allocator, server: *std.http.Server) !void {
+    server_ready = true;
+    errdefer server_ready = false;
+    log.debug(
+        "tid {d} (server): server waiting to accept. requests remaining: {d}",
+        .{ std.Thread.getCurrentId(), server_remaining_requests + 1 },
+    );
+    var res = try server.accept(.{ .allocator = allocator });
+    server_ready = false;
+    defer res.deinit();
+    defer _ = res.reset();
+    try res.wait(); // wait for client to send a complete request head
+
+    const errstr = "Internal Server Error\n";
+    var errbuf: [errstr.len]u8 = undefined;
+    @memcpy(&errbuf, errstr);
+    var response_bytes: []const u8 = errbuf[0..];
+
+    if (res.request.content_length) |l|
+        server_request_aka_lambda_response = try res.reader().readAllAlloc(allocator, @as(usize, l));
+
+    log.debug(
+        "tid {d} (server): {d} bytes read from request",
+        .{ std.Thread.getCurrentId(), server_request_aka_lambda_response.len },
+    );
+
+    // try response.headers.append("content-type", "text/plain");
+    response_bytes = serve(allocator, &res) catch |e| brk: {
+        res.status = .internal_server_error;
+        // TODO: more about this particular request
+        log.err("Unexpected error from executor processing request: {any}", .{e});
+        if (@errorReturnTrace()) |trace| {
+            std.debug.dumpStackTrace(trace.*);
+        }
+        break :brk "Unexpected error generating request to lambda";
+    };
+    res.transfer_encoding = .{ .content_length = response_bytes.len };
+    try res.do();
+    _ = try res.writer().writeAll(response_bytes);
+    try res.finish();
+    log.debug(
+        "tid {d} (server): sent response",
+        .{std.Thread.getCurrentId()},
+    );
+}
+
+fn serve(allocator: std.mem.Allocator, res: *std.http.Server.Response) ![]const u8 {
+    _ = allocator;
+    // try res.headers.append("content-length", try std.fmt.allocPrint(allocator, "{d}", .{server_response.len}));
+    try res.headers.append("Lambda-Runtime-Aws-Request-Id", "69");
+    return server_response;
+}
+
+fn handler(allocator: std.mem.Allocator, event_data: []const u8) ![]const u8 {
+    _ = allocator;
+    return event_data;
+}
+fn test_run(allocator: std.mem.Allocator, event_handler: HandlerFn) !std.Thread {
+    return try std.Thread.spawn(
+        .{},
+        run,
+        .{ allocator, event_handler },
+    );
+}
+
+fn lambda_request(allocator: std.mem.Allocator, request: []const u8) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var aa = arena.allocator();
+    // Setup our server to run, and set the response for the server to the
+    // request. There is a cognitive disconnect here between mental model and
+    // physical model.
+    //
+    // Mental model:
+    //
+    // Lambda request -> λ -> Lambda response
+    //
+    // Physcial Model:
+    //
+    // 1. λ requests instructions from server
+    // 2. server provides "Lambda request"
+    // 3. λ posts response back to server
+    //
+    // So here we are setting up our server, then our lambda request loop,
+    // but it all needs to be in seperate threads so we can control startup
+    // and shut down. Both server and Lambda are set up to watch global variable
+    // booleans to know when to shut down. This function is designed for a
+    // single request/response pair only
+
+    server_remaining_requests = 2; // Tell our server to run for just two requests
+    server_response = request; // set our instructions to lambda, which in our
+    // physical model above, is the server response
+    defer server_response = "unset"; // set it back so we don't get confused later
+    // when subsequent tests fail
+    const server_thread = try startServer(aa); // start the server, get it ready
+    while (!server_ready)
+        std.time.sleep(100);
+
+    log.debug("tid {d} (main): server reports ready", .{std.Thread.getCurrentId()});
+    // we aren't testing the server,
+    // so we'll use the arena allocator
+    defer server_thread.join(); // we'll be shutting everything down before we exit
+
+    // Now we need to start the lambda framework, following a siimilar pattern
+    lambda_remaining_requests = 1; // in case anyone messed with this, we will make sure we start
+    const lambda_thread = try test_run(allocator, handler); // We want our function under test to report leaks
+    lambda_thread.join();
+    return server_request_aka_lambda_response;
+}
+
+test "basic request" {
+    // std.testing.log_level = .debug;
+    const allocator = std.testing.allocator;
+    const request =
+        \\{"foo": "bar", "baz": "qux"}
+    ;
+    const lambda_response = try lambda_request(allocator, request);
+    try std.testing.expectEqualStrings(lambda_response, request);
 }
