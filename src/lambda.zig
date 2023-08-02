@@ -174,8 +174,10 @@ pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // T
         const response_content = try std.fmt.allocPrint(req_allocator, "{s} \"content\": \"{s}\" {s}", .{ "{", event_response, "}" });
         var resp_req = try client.request(.POST, response_uri, empty_headers, .{});
         defer resp_req.deinit();
+        resp_req.transfer_encoding = .{ .content_length = response_content.len };
         try resp_req.start();
         try resp_req.writeAll(response_content); // TODO: AllocPrint + writeAll makes no sense
+        try resp_req.finish();
         resp_req.wait() catch |err| {
             // TODO: report error
             log.err("Error posting response for request id {s}: {}", .{ req_id, err });
