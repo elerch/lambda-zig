@@ -344,7 +344,11 @@ fn lambda_request(allocator: std.mem.Allocator, request: []const u8) ![]u8 {
     // booleans to know when to shut down. This function is designed for a
     // single request/response pair only
 
-    server_remaining_requests = 2; // Tell our server to run for just two requests
+    lambda_remaining_requests = 1; // in case anyone messed with this, we will make sure we start
+    server_remaining_requests = lambda_remaining_requests.? * 2; // Lambda functions
+    // fetch from the server,
+    // then post back. Always
+    // 2, no more, no less
     server_response = request; // set our instructions to lambda, which in our
     // physical model above, is the server response
     defer server_response = "unset"; // set it back so we don't get confused later
@@ -359,7 +363,6 @@ fn lambda_request(allocator: std.mem.Allocator, request: []const u8) ![]u8 {
     defer server_thread.join(); // we'll be shutting everything down before we exit
 
     // Now we need to start the lambda framework, following a siimilar pattern
-    lambda_remaining_requests = 1; // in case anyone messed with this, we will make sure we start
     const lambda_thread = try test_run(allocator, handler); // We want our function under test to report leaks
     lambda_thread.join();
     return server_request_aka_lambda_response;
