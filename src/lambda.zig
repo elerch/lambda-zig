@@ -157,19 +157,19 @@ pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // T
                 // Lambda infrastrucutre restarts, so it's unclear if that's necessary.
                 // It seems as though a continue should be fine, and slightly faster
                 // std.os.exit(1);
-                std.log.err("Get fail: {} {s}", .{
+                log.err("Get fail: {} {s}", .{
                     @intFromEnum(err_req.response.status),
                     err_req.response.status.phrase() orelse "",
                 });
                 continue;
             }
-            std.log.err("Post complete", .{});
+            log.err("Post complete", .{});
             continue;
         };
         // TODO: We should catch these potential alloc errors too
         // TODO: This whole loop should be in another function so we can catch everything at once
         const response_url = try std.fmt.allocPrint(req_allocator, "{s}{s}{s}/{s}/response", .{ prefix, lambda_runtime_uri, postfix, req_id });
-        defer allocator.free(response_url);
+        defer alloc.free(response_url);
         const response_uri = try std.Uri.parse(response_url);
         const response_content = try std.fmt.allocPrint(req_allocator, "{s} \"content\": \"{s}\" {s}", .{ "{", event_response, "}" });
         var resp_req = try client.request(.POST, response_uri, empty_headers, .{});
@@ -178,7 +178,7 @@ pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // T
         try resp_req.writeAll(response_content); // TODO: AllocPrint + writeAll makes no sense
         resp_req.wait() catch |err| {
             // TODO: report error
-            std.log.err("Error posting response for request id {s}: {}", .{ req_id, err });
+            log.err("Error posting response for request id {s}: {}", .{ req_id, err });
             continue;
         };
     }
