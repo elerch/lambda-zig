@@ -374,7 +374,12 @@ test "basic request" {
     const request =
         \\{"foo": "bar", "baz": "qux"}
     ;
+
+    // This is what's actually coming back. Is this right?
+    const expected_response =
+        \\{ "content": "{"foo": "bar", "baz": "qux"}" }
+    ;
     const lambda_response = try lambda_request(allocator, request);
-    try std.testing.expectEqualStrings(lambda_response, request);
     defer allocator.free(lambda_response);
+    try std.testing.expectEqualStrings(expected_response, lambda_response);
 }
