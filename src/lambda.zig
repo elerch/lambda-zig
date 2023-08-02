@@ -2,6 +2,8 @@ const std = @import("std");
 
 const HandlerFn = *const fn (std.mem.Allocator, []const u8) anyerror![]const u8;
 
+const log = std.log.scoped(.lambda);
+
 /// Starts the lambda framework. Handler will be called when an event is processing
 /// If an allocator is not provided, an approrpriate allocator will be selected and used
 pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // TODO: remove inferred error set?
@@ -22,7 +24,7 @@ pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // T
     defer client.deinit();
     var empty_headers = std.http.Headers.init(alloc);
     defer empty_headers.deinit();
-    std.log.info("Bootstrap initializing with event url: {s}", .{url});
+    log.info("tid {d} (lambda): Bootstrap initializing with event url: {s}", .{ std.Thread.getCurrentId(), url });
 
     while (true) {
         var req_alloc = std.heap.ArenaAllocator.init(alloc);
@@ -32,7 +34,7 @@ pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // T
         defer req.deinit();
 
         req.start() catch |err| { // Well, at this point all we can do is shout at the void
-            std.log.err("Get fail (start): {}", .{err});
+            log.err("Get fail (start): {}", .{err});
             std.os.exit(0);
             continue;
         };
@@ -40,7 +42,7 @@ pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // T
         // Lambda freezes the process at this line of code. During warm start,
         // the process will unfreeze and data will be sent in response to client.get
         req.wait() catch |err| { // Well, at this point all we can do is shout at the void
-            std.log.err("Get fail (wait): {}", .{err});
+            log.err("Get fail (wait): {}", .{err});
             std.os.exit(0);
             continue;
         };
@@ -49,7 +51,7 @@ pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // T
             // Lambda infrastrucutre restarts, so it's unclear if that's necessary.
             // It seems as though a continue should be fine, and slightly faster
             // std.os.exit(1);
-            std.log.err("Get fail: {} {s}", .{
+            log.err("Get fail: {} {s}", .{
                 @intFromEnum(req.response.status),
                 req.response.status.phrase() orelse "",
             });
@@ -64,7 +66,7 @@ pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // T
             if (std.ascii.eqlIgnoreCase(h.name, "Content-Length")) {
                 content_length = std.fmt.parseUnsigned(usize, h.value, 10) catch null;
                 if (content_length == null)
-                    std.log.warn("Error parsing content length value: '{s}'", .{h.value});
+                    log.warn("Error parsing content length value: '{s}'", .{h.value});
             }
             // TODO: XRay uses an environment variable to do its magic. It's our
             //       responsibility to set this, but no zig-native setenv(3)/putenv(3)
@@ -78,10 +80,11 @@ pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // T
             // We can't report back an issue because the runtime error reporting endpoint
             // uses request id in its path. So the best we can do is log the error and move
             // on here.
-            std.log.err("Could not find request id: skipping request", .{});
+            log.err("Could not find request id: skipping request", .{});
             continue;
         }
         const req_id = request_id.?;
+        log.debug("got lambda request with id {s}", .{req_id});
 
         const reader = req.reader();
         var buf: [65535]u8 = undefined;
@@ -89,7 +92,7 @@ pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // T
         var resp_payload = std.ArrayList(u8).init(req_allocator);
         if (content_length) |len| {
             resp_payload.ensureTotalCapacity(len) catch {
-                std.log.err("Could not allocate memory for body of request id: {s}", .{request_id.?});
+                log.err("Could not allocate memory for body of request id: {s}", .{request_id.?});
                 continue;
             };
         }
@@ -105,9 +108,9 @@ pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // T
             // Stack trace will return null if stripped
             const return_trace = @errorReturnTrace();
             if (return_trace) |rt|
-                std.log.err("Caught error: {}. Return Trace: {any}", .{ err, rt })
+                log.err("Caught error: {}. Return Trace: {any}", .{ err, rt })
             else
-                std.log.err("Caught error: {}. No return trace available", .{err});
+                log.err("Caught error: {}. No return trace available", .{err});
             const err_url = try std.fmt.allocPrint(req_allocator, "{s}{s}/runtime/invocation/{s}/error", .{ prefix, lambda_runtime_uri, req_id });
             defer req_allocator.free(err_url);
             const err_uri = try std.Uri.parse(err_url);
@@ -123,7 +126,7 @@ pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // T
             else
                 try std.fmt.allocPrint(req_allocator, content, .{ "{", @errorName(err), "no return trace available", "}" });
             defer req_allocator.free(content_fmt);
-            std.log.err("Posting to {s}: Data {s}", .{ err_url, content_fmt });
+            log.err("Posting to {s}: Data {s}", .{ err_url, content_fmt });
 
             var err_headers = std.http.Headers.init(req_allocator);
             defer err_headers.deinit();
@@ -131,20 +134,20 @@ pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // T
                 "Lambda-Runtime-Function-Error-Type",
                 "HandlerReturned",
             ) catch |append_err| {
-                std.log.err("Error appending error header to post response for request id {s}: {}", .{ req_id, append_err });
+                log.err("Error appending error header to post response for request id {s}: {}", .{ req_id, append_err });
                 std.os.exit(0);
                 continue;
             };
             var err_req = try client.request(.POST, err_uri, empty_headers, .{});
             defer err_req.deinit();
             err_req.start() catch |post_err| { // Well, at this point all we can do is shout at the void
-                std.log.err("Error posting response for request id {s}: {}", .{ req_id, post_err });
+                log.err("Error posting response for request id {s}: {}", .{ req_id, post_err });
                 std.os.exit(0);
                 continue;
             };
 
             err_req.wait() catch |post_err| { // Well, at this point all we can do is shout at the void
-                std.log.err("Error posting response for request id {s}: {}", .{ req_id, post_err });
+                log.err("Error posting response for request id {s}: {}", .{ req_id, post_err });
                 std.os.exit(0);
                 continue;
             };
