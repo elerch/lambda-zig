@@ -365,7 +365,7 @@ fn lambda_request(allocator: std.mem.Allocator, request: []const u8) ![]u8 {
     // Now we need to start the lambda framework, following a siimilar pattern
     const lambda_thread = try test_run(allocator, handler); // We want our function under test to report leaks
     lambda_thread.join();
-    return server_request_aka_lambda_response;
+    return try allocator.dupe(u8, server_request_aka_lambda_response);
 }
 
 test "basic request" {
@@ -376,4 +376,5 @@ test "basic request" {
     ;
     const lambda_response = try lambda_request(allocator, request);
     try std.testing.expectEqualStrings(lambda_response, request);
+    defer allocator.free(lambda_response);
 }
