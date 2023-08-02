@@ -60,7 +60,7 @@ pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // T
 
         var request_id: ?[]const u8 = null;
         var content_length: ?usize = null;
-        for (req.headers.list.items) |h| {
+        for (req.response.headers.list.items) |h| {
             if (std.ascii.eqlIgnoreCase(h.name, "Lambda-Runtime-Aws-Request-Id"))
                 request_id = h.value;
             if (std.ascii.eqlIgnoreCase(h.name, "Content-Length")) {
