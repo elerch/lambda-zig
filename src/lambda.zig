@@ -175,7 +175,7 @@ pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // T
         // TODO: We should catch these potential alloc errors too
         // TODO: This whole loop should be in another function so we can catch everything at once
         const response_url = try std.fmt.allocPrint(req_allocator, "{s}{s}{s}/{s}/response", .{ prefix, lambda_runtime_uri, postfix, req_id });
-        defer alloc.free(response_url);
+        defer req_allocator.free(response_url);
         const response_uri = try std.Uri.parse(response_url);
         const response_content = try std.fmt.allocPrint(req_allocator, "{s} \"content\": \"{s}\" {s}", .{ "{", event_response, "}" });
         var resp_req = try client.request(.POST, response_uri, empty_headers, .{});
