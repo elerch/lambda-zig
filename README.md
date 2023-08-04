@@ -1,7 +1,7 @@
 lambda-zig: A Custom Runtime for AWS Lambda
 ===========================================
 
-This is a sample custom runtime built in zig. Simple projects will execute
+This is a sample custom runtime built in zig (0.11). Simple projects will execute
 in <1ms, with a cold start init time of approximately 11ms.
 
 Some custom build steps have been added to build.zig, which will only currently appear if compiling from a linux operating system:
@@ -27,9 +27,6 @@ calls out to the shell for AWS operations, you will need the AWS CLI. v2.2.43 ha
 Caveats:
 
 * Unhandled invocation errors seem to be causing timeouts
-* This has been upgraded to zig version 0.11.0-dev.3886+0c1bfe271 and relies on
-  features introduced January 12th 2023. I intend to make it compatible with
-  zig 0.11 on its release in August 2023
 * zig build options only appear if compiling using linux, although it should be trivial
   to make it work on other Unix-like operating systems (e.g. macos, freebsd). In fact,
   it will likely work with just a change to the operating system check
