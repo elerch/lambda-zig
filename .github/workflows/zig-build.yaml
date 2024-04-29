@@ -1,0 +1,29 @@
+name: Generic zig build
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - '*'
+      - '!zig-develop*'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: elerch/setup-zig@v3
+        with:
+          version: 0.12.0
+      - uses: Hanaasagi/zig-action-cache@v1.1.5
+      - name: Build project
+        run: zig build --summary all
+      - name: Run tests
+        run: zig build test --summary all
+      - name: Notify
+        uses: elerch/action-notify-ntfy@v2.github
+        if: env.GITEA_ACTIONS == 'true'
+        with:
+          host: ${{ secrets.NTFY_HOST }}
+          topic: ${{ secrets.NTFY_TOPIC }}
+          status: ${{ job.status }}
+          user: ${{ secrets.NTFY_USER }}
+          password: ${{ secrets.NTFY_PASSWORD }}
