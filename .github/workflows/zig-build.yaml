@@ -20,7 +20,7 @@ jobs:
         run: zig build test --summary all
       - name: Notify
         uses: elerch/action-notify-ntfy@v2.github
-        if: env.GITEA_ACTIONS == 'true'
+        if: always() && env.GITEA_ACTIONS == 'true'
         with:
           host: ${{ secrets.NTFY_HOST }}
           topic: ${{ secrets.NTFY_TOPIC }}
