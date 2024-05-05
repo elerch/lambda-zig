@@ -30,7 +30,7 @@ fn addArgs(allocator: std.mem.Allocator, original: []const u8, args: [][]const u
 /// deploy depends on iam and package
 ///
 /// iam and package do not have any dependencies
-pub fn lambdaBuildOptions(b: *std.build.Builder, exe: *std.Build.Step.Compile) !void {
+pub fn lambdaBuildOptions(b: *std.Build, exe: *std.Build.Step.Compile) !void {
     // The rest of this function is currently reliant on the use of Linux
     // system being used to build the lambda function
     //
@@ -143,7 +143,7 @@ pub fn lambdaBuildOptions(b: *std.build.Builder, exe: *std.Build.Step.Compile) !
     }
     const cmd = try std.fmt.allocPrint(b.allocator, ifstatement, .{
         function_name_file,
-        std.fs.path.dirname(exe.root_src.?.path).?,
+        std.fs.path.dirname(exe.root_module.root_source_file.?.path).?,
         function_name_file,
         function_name,
         not_found_fmt,

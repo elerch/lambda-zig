@@ -45,7 +45,7 @@ pub fn build(b: *std.Build) !void {
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&run_main_tests.step);
 
-    var exe = b.addExecutable(.{
+    const exe = b.addExecutable(.{
         .name = "custom",
         .root_source_file = .{ .path = "src/sample-main.zig" },
         .target = target,
@@ -72,6 +72,6 @@ pub fn build(b: *std.Build) !void {
 /// deploy depends on iam and package
 ///
 /// iam and package do not have any dependencies
-pub fn lambdaBuildOptions(b: *std.build.Builder, exe: *std.Build.Step.Compile) !void {
+pub fn lambdaBuildOptions(b: *std.Build, exe: *std.Build.Step.Compile) !void {
     try @import("lambdabuild.zig").lambdaBuildOptions(b, exe);
 }
