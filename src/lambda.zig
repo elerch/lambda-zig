@@ -165,17 +165,17 @@ const Event = struct {
             .{ prefix, lambda_runtime_uri, postfix, self.request_id },
         );
         defer self.allocator.free(response_url);
-        const response_content = try std.fmt.allocPrint(
-            self.allocator,
-            "{{ \"content\": \"{s}\" }}",
-            .{event_response},
-        );
-        defer self.allocator.free(response_content);
         var cl = std.http.Client{ .allocator = self.allocator };
         defer cl.deinit();
+        // Lambda does different things, depending on the runtime. Go 1.x takes
+        // any return value but escapes double quotes. Custom runtimes can
+        // do whatever they want. node I believe wraps as a json object. We're
+        // going to leave the return value up to the handler, and they can
+        // use a seperate API for normalization so we're explicit. As a result,
+        // we can just post event_response completely raw here
         const res = try cl.fetch(.{
             .method = .POST,
-            .payload = response_content,
+            .payload = event_response,
             .location = .{ .url = response_url },
         });
         if (res.status != .ok) return error.UnexpectedStatusFromPostResponse;
@@ -420,7 +420,7 @@ test "basic request" {
 
     // This is what's actually coming back. Is this right?
     const expected_response =
-        \\{ "content": "{"foo": "bar", "baz": "qux"}" }
+        \\{"foo": "bar", "baz": "qux"}
     ;
     const lambda_response = try lambda_request(allocator, request, 1);
     defer deinit();
@@ -437,7 +437,7 @@ test "several requests do not fail" {
 
     // This is what's actually coming back. Is this right?
     const expected_response =
-        \\{ "content": "{"foo": "bar", "baz": "qux"}" }
+        \\{"foo": "bar", "baz": "qux"}
     ;
     const lambda_response = try lambda_request(allocator, request, 5);
     defer deinit();
