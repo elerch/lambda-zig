@@ -1,7 +1,7 @@
 lambda-zig: A Custom Runtime for AWS Lambda
 ===========================================
 
-This is a sample custom runtime built in zig (0.11). Simple projects will execute
+This is a sample custom runtime built in zig (0.12). Simple projects will execute
 in <1ms, with a cold start init time of approximately 11ms.
 
 Some custom build steps have been added to build.zig, which will only currently appear if compiling from a linux operating system:
