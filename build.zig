@@ -73,5 +73,10 @@ pub fn build(b: *std.Build) !void {
 ///
 /// iam and package do not have any dependencies
 pub fn lambdaBuildOptions(b: *std.Build, exe: *std.Build.Step.Compile) !void {
-    try @import("lambdabuild.zig").lambdaBuildOptions(b, exe);
+    const function_name = b.option([]const u8, "function-name", "Function name for Lambda [zig-fn]") orelse "zig-fn";
+    try @import("lambdabuild.zig").configureBuild(b, exe, function_name);
+}
+
+pub fn configureBuild(b: *std.Build, exe: *std.Build.Step.Compile, function_name: []const u8) !void {
+    try @import("lambdabuild.zig").configureBuild(b, exe, function_name);
 }

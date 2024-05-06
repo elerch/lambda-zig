@@ -14,23 +14,23 @@ fn addArgs(allocator: std.mem.Allocator, original: []const u8, args: [][]const u
     return rc;
 }
 
-/// lambdaBuildOptions will add three build options to the build (if compiling
+/// lambdaBuildSteps will add four build steps to the build (if compiling
 /// the code on a Linux host):
 ///
-/// * package:   Packages the function for deployment to Lambda
-///              (dependencies are the zip executable and a shell)
-/// * iam:       Gets an IAM role for the Lambda function, and creates it if it does not exist
-///              (dependencies are the AWS CLI, grep and a shell)
-/// * deploy:    Deploys the lambda function to a live AWS environment
-///              (dependencies are the AWS CLI, and a shell)
-/// * remoterun: Runs the lambda function in a live AWS environment
-///              (dependencies are the AWS CLI, and a shell)
+/// * awslambda_package:   Packages the function for deployment to Lambda
+///                        (dependencies are the zip executable and a shell)
+/// * awslambda_iam:       Gets an IAM role for the Lambda function, and creates it if it does not exist
+///                        (dependencies are the AWS CLI, grep and a shell)
+/// * awslambda_deploy:    Deploys the lambda function to a live AWS environment
+///                        (dependencies are the AWS CLI, and a shell)
+/// * awslambda_run:       Runs the lambda function in a live AWS environment
+///                        (dependencies are the AWS CLI, and a shell)
 ///
-/// remoterun depends on deploy
-/// deploy depends on iam and package
+/// awslambda_run depends on deploy
+/// awslambda_deploy depends on iam and package
 ///
 /// iam and package do not have any dependencies
-pub fn lambdaBuildOptions(b: *std.Build, exe: *std.Build.Step.Compile) !void {
+pub fn configureBuild(b: *std.Build, exe: *std.Build.Step.Compile, function_name: []const u8) !void {
     // The rest of this function is currently reliant on the use of Linux
     // system being used to build the lambda function
     //
@@ -41,7 +41,7 @@ pub fn lambdaBuildOptions(b: *std.Build, exe: *std.Build.Step.Compile) !void {
     if (builtin.os.tag != .linux) return;
 
     // Package step
-    const package_step = b.step("package", "Package the function");
+    const package_step = b.step("awslambda_package", "Package the function");
     const function_zip = b.getInstallPath(.bin, "function.zip");
 
     // TODO: Avoid use of system-installed zip, maybe using something like
@@ -73,61 +73,73 @@ pub fn lambdaBuildOptions(b: *std.Build, exe: *std.Build.Step.Compile) !void {
     package_step.dependOn(&zip_cmd.step);
 
     // Deployment
-    const deploy_step = b.step("deploy", "Deploy the function");
-    var deal_with_iam = true;
-    if (b.args) |args| {
-        for (args) |arg| {
-            if (std.mem.eql(u8, "--role", arg)) {
-                deal_with_iam = false;
-                break;
-            }
-        }
-    }
+    const deploy_step = b.step("awslambda_deploy", "Deploy the function");
 
-    // TODO: Allow custom lambda role names
-    var iam_role: []u8 = &.{};
-    const iam_step = b.step("iam", "Create/Get IAM role for function");
+    const iam_role_name = b.option(
+        []const u8,
+        "function-role",
+        "IAM role name for function (will create if it does not exist) [lambda_basic_execution]",
+    ) orelse "lambda_basic_execution";
+    const iam_role_arn = b.option(
+        []const u8,
+        "function-arn",
+        "Preexisting IAM role arn for function",
+    );
+
+    const iam_step = b.step("awslambda_iam", "Create/Get IAM role for function");
     deploy_step.dependOn(iam_step); // iam_step will either be a noop or all the stuff below
-    if (deal_with_iam) {
-        // if someone adds '-- --role arn...' to the command line, we don't
-        // need to do anything with the iam role. Otherwise, we'll create/
-        // get the IAM role and stick the name in a file in our destination
-        // directory to be used later
-        const iam_role_name_file = b.getInstallPath(.bin, "iam_role_name");
-        iam_role = try std.fmt.allocPrint(b.allocator, "--role $(cat {s})", .{iam_role_name_file});
-        // defer b.allocator.free(iam_role);
-        if (!fileExists(iam_role_name_file)) {
-            // Role get/creation command
+    const iam_role_param: []u8 = blk: {
+        if (iam_role_arn != null)
+            break :blk try std.fmt.allocPrint(b.allocator, "--role {s}", .{iam_role_arn.?});
+
+        if (iam_role_name.len == 0)
+            @panic("Either function-role or function-arn must be specified. function-arn will allow deployment without creating a role");
+
+        // Now we have an iam role name to use, but no iam role arn. Let's go hunting
+        // Once this is done once, we'll have a file with the arn in "cache"
+        // The iam arn will reside in an 'iam_role' file in the bin directory
+
+        // Build system command to create the role if necessary and get the role arn
+        const iam_role_file = b.getInstallPath(.bin, "iam_role");
+
+        if (!fileExists(iam_role_file)) {
+            // std.debug.print("file does not exist", .{});
+            // Our cache file does not exist on disk, so we'll create/get the role
+            // arn using the AWS CLI and dump to disk here
             const ifstatement_fmt =
-                \\ if aws iam get-role --role-name lambda_basic_execution 2>&1 |grep -q NoSuchEntity; then aws iam create-role --output text --query Role.Arn --role-name lambda_basic_execution --assume-role-policy-document '{
+                \\ if aws iam get-role --role-name {s} 2>&1 |grep -q NoSuchEntity; then aws iam create-role --output text --query Role.Arn --role-name {s} --assume-role-policy-document '{{
                 \\ "Version": "2012-10-17",
                 \\ "Statement": [
-                \\   {
+                \\   {{
                 \\     "Sid": "",
                 \\     "Effect": "Allow",
-                \\     "Principal": {
+                \\     "Principal": {{
                 \\       "Service": "lambda.amazonaws.com"
-                \\     },
+                \\     }},
                 \\     "Action": "sts:AssumeRole"
-                \\   }
-                \\ ]}' > /dev/null; fi && \
+                \\   }}
+                \\ ]}}' > /dev/null; fi && \
                 \\ aws iam attach-role-policy --policy-arn arn:aws:iam::aws:policy/AWSLambdaExecute --role-name lambda_basic_execution && \
-                \\ aws iam get-role --role-name lambda_basic_execution --query Role.Arn --output text > 
+                \\ aws iam get-role --role-name lambda_basic_execution --query Role.Arn --output text > {s}
             ;
-
-            const ifstatement = try std.mem.concat(b.allocator, u8, &[_][]const u8{ ifstatement_fmt, iam_role_name_file });
-            defer b.allocator.free(ifstatement);
+            const ifstatement = try std.fmt.allocPrint(
+                b.allocator,
+                ifstatement_fmt,
+                .{ iam_role_name, iam_role_name, iam_role_file },
+            );
             iam_step.dependOn(&b.addSystemCommand(&.{ "/bin/sh", "-c", ifstatement }).step);
         }
-    }
-    const function_name = b.option([]const u8, "function-name", "Function name for Lambda [zig-fn]") orelse "zig-fn";
+
+        break :blk try std.fmt.allocPrint(b.allocator, "--role \"$(cat {s})\"", .{iam_role_file});
+    };
     const function_name_file = b.getInstallPath(.bin, function_name);
     const ifstatement = "if [ ! -f {s} ] || [ {s} -nt {s} ]; then if aws lambda get-function --function-name {s} 2>&1 |grep -q ResourceNotFoundException; then echo not found > /dev/null; {s}; else echo found > /dev/null; {s}; fi; fi";
     // The architectures option was introduced in 2.2.43 released 2021-10-01
     // We want to use arm64 here because it is both faster and cheaper for most
     // Amazon Linux 2 is the only arm64 supported option
+    // TODO: This should determine compilation target and use x86_64 if needed
     const not_found = "aws lambda create-function --architectures arm64 --runtime provided.al2 --function-name {s} --zip-file fileb://{s} --handler not_applicable {s} && touch {s}";
-    const not_found_fmt = try std.fmt.allocPrint(b.allocator, not_found, .{ function_name, function_zip, iam_role, function_name_file });
+    const not_found_fmt = try std.fmt.allocPrint(b.allocator, not_found, .{ function_name, function_zip, iam_role_param, function_name_file });
     defer b.allocator.free(not_found_fmt);
     const found = "aws lambda update-function-code --function-name {s} --zip-file fileb://{s} && touch {s}";
     const found_fmt = try std.fmt.allocPrint(b.allocator, found, .{ function_name, function_zip, function_name_file });
@@ -143,7 +155,7 @@ pub fn lambdaBuildOptions(b: *std.Build, exe: *std.Build.Step.Compile) !void {
     }
     const cmd = try std.fmt.allocPrint(b.allocator, ifstatement, .{
         function_name_file,
-        std.fs.path.dirname(exe.root_module.root_source_file.?.path).?,
+        b.getInstallPath(.bin, exe.out_filename),
         function_name_file,
         function_name,
         not_found_fmt,
@@ -156,10 +168,6 @@ pub fn lambdaBuildOptions(b: *std.Build, exe: *std.Build.Step.Compile) !void {
     deploy_step.dependOn(package_step);
     deploy_step.dependOn(&b.addSystemCommand(&.{ "/bin/sh", "-c", cmd }).step);
 
-    // TODO: Looks like IquanaTLS isn't playing nicely with payloads this small
-    // const payload = b.option([]const u8, "payload", "Lambda payload [{\"foo\":\"bar\"}]") orelse
-    //     \\ {"foo": "bar"}"
-    // ;
     const payload = b.option([]const u8, "payload", "Lambda payload [{\"foo\":\"bar\", \"baz\": \"qux\"}]") orelse
         \\ {"foo": "bar", "baz": "qux"}"
     ;
@@ -185,6 +193,6 @@ pub fn lambdaBuildOptions(b: *std.Build, exe: *std.Build.Step.Compile) !void {
         run_cmd.addArgs(args);
     }
 
-    const run_step = b.step("remoterun", "Run the app in AWS lambda");
+    const run_step = b.step("awslambda_run", "Run the app in AWS lambda");
     run_step.dependOn(&run_cmd.step);
 }
