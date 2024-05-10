@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const HandlerFn = *const fn (std.mem.Allocator, []const u8) anyerror![]const u8;
+pub const HandlerFn = *const fn (std.mem.Allocator, []const u8) anyerror![]const u8;
 
 const log = std.log.scoped(.lambda);
 
@@ -355,15 +355,8 @@ fn handler(allocator: std.mem.Allocator, event_data: []const u8) ![]const u8 {
     _ = allocator;
     return event_data;
 }
-fn test_run(allocator: std.mem.Allocator, event_handler: HandlerFn) !std.Thread {
-    return try std.Thread.spawn(
-        .{},
-        run,
-        .{ allocator, event_handler },
-    );
-}
 
-fn lambda_request(allocator: std.mem.Allocator, request: []const u8, request_count: usize) ![]u8 {
+pub fn test_lambda_request(allocator: std.mem.Allocator, request: []const u8, request_count: usize, handler_fn: HandlerFn) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const aa = arena.allocator();
@@ -405,9 +398,8 @@ fn lambda_request(allocator: std.mem.Allocator, request: []const u8, request_cou
     // so we'll use the arena allocator
     defer server_thread.join(); // we'll be shutting everything down before we exit
 
-    // Now we need to start the lambda framework, following a siimilar pattern
-    const lambda_thread = try test_run(allocator, handler); // We want our function under test to report leaks
-    lambda_thread.join();
+    // Now we need to start the lambda framework
+    try run(allocator, handler_fn); // We want our function under test to report leaks
     return try allocator.dupe(u8, server_request_aka_lambda_response);
 }
 
@@ -422,7 +414,7 @@ test "basic request" {
     const expected_response =
         \\{"foo": "bar", "baz": "qux"}
     ;
-    const lambda_response = try lambda_request(allocator, request, 1);
+    const lambda_response = try test_lambda_request(allocator, request, 1, handler);
     defer deinit();
     defer allocator.free(lambda_response);
     try std.testing.expectEqualStrings(expected_response, lambda_response);
@@ -439,8 +431,8 @@ test "several requests do not fail" {
     const expected_response =
         \\{"foo": "bar", "baz": "qux"}
     ;
-    const lambda_response = try lambda_request(allocator, request, 5);
+    const lambda_response = try test_lambda_request(allocator, request, 5);
     defer deinit();
     defer allocator.free(lambda_response);
-    try std.testing.expectEqualStrings(expected_response, lambda_response);
+    try std.testing.expectEqualStrings(expected_response, lambda_response, handler);
 }
