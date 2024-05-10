@@ -431,8 +431,8 @@ test "several requests do not fail" {
     const expected_response =
         \\{"foo": "bar", "baz": "qux"}
     ;
-    const lambda_response = try test_lambda_request(allocator, request, 5);
+    const lambda_response = try test_lambda_request(allocator, request, 5, handler);
     defer deinit();
     defer allocator.free(lambda_response);
-    try std.testing.expectEqualStrings(expected_response, lambda_response, handler);
+    try std.testing.expectEqualStrings(expected_response, lambda_response);
 }
