@@ -7,6 +7,12 @@
     // This field is optional.
     // This is currently advisory only; Zig does not yet do anything
     // with this value.
+    .dependencies = .{
+        .aws = .{
+            .url = "https://git.lerch.org/api/packages/lobo/generic/aws-sdk-with-models/908c9d2d429b1f38c835363db566aa17bf1742fd/908c9d2d429b1f38c835363db566aa17bf1742fd-with-models.tar.gz",
+            .hash = "122022770a177afb2ee46632f88ad5468a5dea8df22170d1dea5163890b0a881399d",
+        },
+    },
     .minimum_zig_version = "0.12.0",
 
     // Specifies the set of files and directories that are included in this package.
@@ -20,6 +26,7 @@
         "build.zig.zon",
         "lambdabuild.zig",
         "src",
+        "lambdabuild",
         "LICENSE",
         "README.md",
     },

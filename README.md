@@ -1,37 +1,37 @@
 lambda-zig: A Custom Runtime for AWS Lambda
 ===========================================
 
-This is a sample custom runtime built in zig (0.12). Simple projects will execute
+This is a sample custom runtime built in zig (0.13). Simple projects will execute
 in <1ms, with a cold start init time of approximately 11ms.
 
 Some custom build steps have been added to build.zig, which will only currently appear if compiling from a linux operating system:
 
-* `zig build iam`: Deploy and record a default IAM role for the lambda function
-* `zig build package`: Package the lambda function for upload
-* `zig build deploy`: Deploy the lambda function
-* `zig build remoterun`: Run the lambda function
+* `zig build awslambda_iam`: Deploy and record a default IAM role for the lambda function
+* `zig build awslambda_package`: Package the lambda function for upload
+* `zig build awslambda_deploy`: Deploy the lambda function
+* `zig build awslambda_run`: Run the lambda function
 
 Custom options:
 
 * **function-name**: set the name of the AWS Lambda function
-* **payload**: Use this to set the payload of the function when run using `zig build remoterun`
+* **payload**: Use this to set the payload of the function when run using `zig build awslambda_run`
+* **region**: Use this to set the region for the function deployment/run
+* **function-role**: Name of the role to use for the function. The system will
+                     look up the arn from this name, and create if it does not exist
+* **function-arn**: Role arn to use with the function. This must exist
 
-Additionally, a custom IAM role can be used for the function by appending ``-- --role myawesomerole``
-to the `zig build deploy` command. This has not really been tested. The role name
-is cached in zig-out/bin/iam_role_name, so you can also just set that to the full
-arn of your iam role if you'd like.
-
-The AWS Lambda function is compiled as a linux ARM64 executable. Since the build.zig
-calls out to the shell for AWS operations, you will need the AWS CLI. v2.2.43 has been tested.
+The AWS Lambda function can be compiled as a linux x86_64 or linux aarch64
+executable. The build script will set the architecture appropriately
 
 Caveats:
 
-* Unhandled invocation errors seem to be causing timeouts
-* zig build options only appear if compiling using linux, although it should be trivial
-  to make it work on other Unix-like operating systems (e.g. macos, freebsd). In fact,
-  it will likely work with just a change to the operating system check
-* There are a **ton** of TODO's in this code. Current state is more of a proof of
-  concept. PRs are welcome!
+* Building on Windows will not yet work, as the package step still uses
+  system commands due to the need to create a zip file, and the current lack
+  of zip file creation capabilities in the standard library (you can read, but
+  not write, zip files with the standard library). A TODO exists with more
+  information should you wish to file a PR.
+* Caching is not yet implemented in the package or deployment steps, so the
+  function will be deployed on every build
 
 A sample project using this runtime can be found at https://git.lerch.org/lobo/lambda-zig-sample
 

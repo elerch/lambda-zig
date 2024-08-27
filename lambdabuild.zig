@@ -1,5 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const Package = @import("lambdabuild/Package.zig");
+const Iam = @import("lambdabuild/Iam.zig");
+const Deploy = @import("lambdabuild/Deploy.zig");
+const Invoke = @import("lambdabuild/Invoke.zig");
 
 fn fileExists(file_name: []const u8) bool {
     const file = std.fs.openFileAbsolute(file_name, .{}) catch return false;
@@ -40,159 +44,122 @@ pub fn configureBuild(b: *std.Build, exe: *std.Build.Step.Compile, function_name
     // TODO: support other host OSs
     if (builtin.os.tag != .linux) return;
 
-    // Package step
-    const package_step = b.step("awslambda_package", "Package the function");
-    const function_zip = b.getInstallPath(.bin, "function.zip");
+    @import("aws").aws.globalLogControl(.info, .warn, .info, false);
+    const package_step = Package.create(b, .{ .exe = exe });
 
-    // TODO: Avoid use of system-installed zip, maybe using something like
-    // https://github.com/hdorio/hwzip.zig/blob/master/src/hwzip.zig
-    const zip = if (std.mem.eql(u8, "bootstrap", exe.out_filename))
-        try std.fmt.allocPrint(b.allocator,
-            \\zip -qj9 {s} {s}
-        , .{
-            function_zip,
-            b.getInstallPath(.bin, "bootstrap"),
-        })
-    else
-        // We need to copy stuff around
-        try std.fmt.allocPrint(b.allocator,
-            \\cp {s} {s} && \
-            \\zip -qj9 {s} {s} && \
-            \\rm {s}
-        , .{
-            b.getInstallPath(.bin, exe.out_filename),
-            b.getInstallPath(.bin, "bootstrap"),
-            function_zip,
-            b.getInstallPath(.bin, "bootstrap"),
-            b.getInstallPath(.bin, "bootstrap"),
-        });
-    // std.debug.print("\nzip cmdline: {s}", .{zip});
-    defer b.allocator.free(zip);
-    var zip_cmd = b.addSystemCommand(&.{ "/bin/sh", "-c", zip });
-    zip_cmd.step.dependOn(b.getInstallStep());
-    package_step.dependOn(&zip_cmd.step);
+    const step = b.step("awslambda_package", "Package the function");
+    step.dependOn(&package_step.step);
+    package_step.step.dependOn(b.getInstallStep());
 
-    // Deployment
-    const deploy_step = b.step("awslambda_deploy", "Deploy the function");
+    // Doing this will require that the aws dependency be added to the downstream
+    // build.zig.zon
+    // const lambdabuild = b.addExecutable(.{
+    //     .name = "lambdabuild",
+    //     .root_source_file = .{
+    //         // we use cwd_relative here because we need to compile this relative
+    //         // to whatever directory this file happens to be. That is likely
+    //         // in a cache directory, not the base of the build.
+    //         .cwd_relative = try std.fs.path.join(b.allocator, &[_][]const u8{
+    //             std.fs.path.dirname(@src().file).?,
+    //             "lambdabuild/src/main.zig",
+    //         }),
+    //     },
+    //     .target = b.host,
+    // });
+    // const aws_dep = b.dependency("aws", .{
+    //     .target = b.host,
+    //     .optimize = lambdabuild.root_module.optimize orelse .Debug,
+    // });
+    // const aws_module = aws_dep.module("aws");
+    // lambdabuild.root_module.addImport("aws", aws_module);
+    //
 
     const iam_role_name = b.option(
         []const u8,
         "function-role",
         "IAM role name for function (will create if it does not exist) [lambda_basic_execution]",
-    ) orelse "lambda_basic_execution";
+    ) orelse "lambda_basic_execution_blah2";
+
     const iam_role_arn = b.option(
         []const u8,
         "function-arn",
         "Preexisting IAM role arn for function",
     );
 
-    const iam_step = b.step("awslambda_iam", "Create/Get IAM role for function");
-    deploy_step.dependOn(iam_step); // iam_step will either be a noop or all the stuff below
-    const iam_role_param: []u8 = blk: {
-        if (iam_role_arn != null)
-            break :blk try std.fmt.allocPrint(b.allocator, "--role {s}", .{iam_role_arn.?});
-
-        if (iam_role_name.len == 0)
-            @panic("Either function-role or function-arn must be specified. function-arn will allow deployment without creating a role");
-
-        // Now we have an iam role name to use, but no iam role arn. Let's go hunting
-        // Once this is done once, we'll have a file with the arn in "cache"
-        // The iam arn will reside in an 'iam_role' file in the bin directory
-
-        // Build system command to create the role if necessary and get the role arn
-        const iam_role_file = b.getInstallPath(.bin, "iam_role");
-
-        if (!fileExists(iam_role_file)) {
-            // std.debug.print("file does not exist", .{});
-            // Our cache file does not exist on disk, so we'll create/get the role
-            // arn using the AWS CLI and dump to disk here
-            const ifstatement_fmt =
-                \\ if aws iam get-role --role-name {s} 2>&1 |grep -q NoSuchEntity; then aws iam create-role --output text --query Role.Arn --role-name {s} --assume-role-policy-document '{{
-                \\ "Version": "2012-10-17",
-                \\ "Statement": [
-                \\   {{
-                \\     "Sid": "",
-                \\     "Effect": "Allow",
-                \\     "Principal": {{
-                \\       "Service": "lambda.amazonaws.com"
-                \\     }},
-                \\     "Action": "sts:AssumeRole"
-                \\   }}
-                \\ ]}}' > /dev/null; fi && \
-                \\ aws iam attach-role-policy --policy-arn arn:aws:iam::aws:policy/AWSLambdaExecute --role-name lambda_basic_execution && \
-                \\ aws iam get-role --role-name lambda_basic_execution --query Role.Arn --output text > {s}
-            ;
-            const ifstatement = try std.fmt.allocPrint(
-                b.allocator,
-                ifstatement_fmt,
-                .{ iam_role_name, iam_role_name, iam_role_file },
-            );
-            iam_step.dependOn(&b.addSystemCommand(&.{ "/bin/sh", "-c", ifstatement }).step);
-        }
-
-        break :blk try std.fmt.allocPrint(b.allocator, "--role \"$(cat {s})\"", .{iam_role_file});
-    };
-    const function_name_file = b.getInstallPath(.bin, function_name);
-    const ifstatement = "if [ ! -f {s} ] || [ {s} -nt {s} ]; then if aws lambda get-function --function-name {s} 2>&1 |grep -q ResourceNotFoundException; then echo not found > /dev/null; {s}; else echo found > /dev/null; {s}; fi; fi";
-    // The architectures option was introduced in 2.2.43 released 2021-10-01
-    // We want to use arm64 here because it is both faster and cheaper for most
-    // Amazon Linux 2 is the only arm64 supported option
-    // TODO: This should determine compilation target and use x86_64 if needed
-    const not_found = "aws lambda create-function --architectures arm64 --runtime provided.al2 --function-name {s} --zip-file fileb://{s} --handler not_applicable {s} && touch {s}";
-    const not_found_fmt = try std.fmt.allocPrint(b.allocator, not_found, .{ function_name, function_zip, iam_role_param, function_name_file });
-    defer b.allocator.free(not_found_fmt);
-    const found = "aws lambda update-function-code --function-name {s} --zip-file fileb://{s} && touch {s}";
-    const found_fmt = try std.fmt.allocPrint(b.allocator, found, .{ function_name, function_zip, function_name_file });
-    defer b.allocator.free(found_fmt);
-    var found_final: []const u8 = undefined;
-    var not_found_final: []const u8 = undefined;
-    if (b.args) |args| {
-        found_final = try addArgs(b.allocator, found_fmt, args);
-        not_found_final = try addArgs(b.allocator, not_found_fmt, args);
-    } else {
-        found_final = found_fmt;
-        not_found_final = not_found_fmt;
-    }
-    const cmd = try std.fmt.allocPrint(b.allocator, ifstatement, .{
-        function_name_file,
-        b.getInstallPath(.bin, exe.out_filename),
-        function_name_file,
-        function_name,
-        not_found_fmt,
-        found_fmt,
+    const iam = Iam.create(b, .{
+        .role_name = iam_role_name,
+        .role_arn = iam_role_arn,
     });
+    const iam_step = b.step("awslambda_iam", "Create/Get IAM role for function");
+    iam_step.dependOn(&iam.step);
 
-    defer b.allocator.free(cmd);
+    const region = b.option([]const u8, "region", "Region to use [default is autodetect from environment/config]") orelse try findRegionFromSystem(b.allocator);
 
-    // std.debug.print("{s}\n", .{cmd});
-    deploy_step.dependOn(package_step);
-    deploy_step.dependOn(&b.addSystemCommand(&.{ "/bin/sh", "-c", cmd }).step);
+    // Deployment
+    const deploy = Deploy.create(b, .{
+        .name = function_name,
+        .package = package_step.packagedFileLazyPath(),
+        .arch = exe.root_module.resolved_target.?.result.cpu.arch,
+        .iam_step = iam,
+        .region = region,
+    });
+    deploy.step.dependOn(&package_step.step);
+
+    const deploy_step = b.step("awslambda_deploy", "Deploy the function");
+    deploy_step.dependOn(&deploy.step);
 
     const payload = b.option([]const u8, "payload", "Lambda payload [{\"foo\":\"bar\", \"baz\": \"qux\"}]") orelse
         \\ {"foo": "bar", "baz": "qux"}"
     ;
 
-    const run_script =
-        \\ f=$(mktemp) && \
-        \\ logs=$(aws lambda invoke \
-        \\          --cli-binary-format raw-in-base64-out \
-        \\          --invocation-type RequestResponse \
-        \\          --function-name {s} \
-        \\          --payload '{s}' \
-        \\          --log-type Tail \
-        \\          --query LogResult \
-        \\          --output text "$f"  |base64 -d) && \
-        \\  cat "$f" && rm "$f" && \
-        \\  echo && echo && echo "$logs"
-    ;
-    const run_script_fmt = try std.fmt.allocPrint(b.allocator, run_script, .{ function_name, payload });
-    defer b.allocator.free(run_script_fmt);
-    const run_cmd = b.addSystemCommand(&.{ "/bin/sh", "-c", run_script_fmt });
-    run_cmd.step.dependOn(deploy_step);
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-
+    const invoke = Invoke.create(b, .{
+        .name = function_name,
+        .payload = payload,
+        .region = region,
+    });
+    invoke.step.dependOn(&deploy.step);
     const run_step = b.step("awslambda_run", "Run the app in AWS lambda");
-    run_step.dependOn(&run_cmd.step);
+    run_step.dependOn(&invoke.step);
+}
+
+// AWS_CONFIG_FILE (default is ~/.aws/config
+// AWS_DEFAULT_REGION
+fn findRegionFromSystem(allocator: std.mem.Allocator) ![]const u8 {
+    const env_map = try std.process.getEnvMap(allocator);
+    if (env_map.get("AWS_DEFAULT_REGION")) |r| return r;
+    const config_file_path = env_map.get("AWS_CONFIG_FILE") orelse
+        try std.fs.path.join(allocator, &[_][]const u8{
+        env_map.get("HOME") orelse env_map.get("USERPROFILE").?,
+        ".aws",
+        "config",
+    });
+    const config_file = try std.fs.openFileAbsolute(config_file_path, .{});
+    defer config_file.close();
+    const config_bytes = try config_file.readToEndAlloc(allocator, 1024 * 1024);
+    const profile = env_map.get("AWS_PROFILE") orelse "default";
+    var line_iterator = std.mem.split(u8, config_bytes, "\n");
+    var in_profile = false;
+    while (line_iterator.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
+        if (!in_profile) {
+            if (trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') {
+                // this is a profile directive!
+                // std.debug.print("profile: {s}, in file: {s}\n", .{ profile, trimmed[1 .. trimmed.len - 1] });
+                if (std.mem.eql(u8, profile, trimmed[1 .. trimmed.len - 1])) {
+                    in_profile = true;
+                }
+            }
+            continue; // we're only looking for a profile at this point
+        }
+        // look for our region directive
+        if (trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']')
+            return error.RegionNotFound; // we've hit another profile without getting our region
+        if (!std.mem.startsWith(u8, trimmed, "region")) continue;
+        var equalityiterator = std.mem.split(u8, trimmed, "=");
+        _ = equalityiterator.next() orelse return error.RegionNotFound;
+        const raw_val = equalityiterator.next() orelse return error.RegionNotFound;
+        return try allocator.dupe(u8, std.mem.trimLeft(u8, raw_val, " \t"));
+    }
+    return error.RegionNotFound;
 }
