@@ -1,6 +1,6 @@
 const std = @import("std");
 const aws = @import("aws").aws;
-
+const Region = @import("Region.zig");
 const Invoke = @This();
 
 step: std.Build.Step,
@@ -16,7 +16,7 @@ pub const Options = struct {
     payload: []const u8,
 
     /// Region for deployment
-    region: []const u8,
+    region: *Region,
 };
 
 pub fn create(owner: *std.Build, options: Options) *Invoke {
@@ -50,7 +50,7 @@ fn make(step: *std.Build.Step, node: std.Progress.Node) anyerror!void {
 
     const options = aws.Options{
         .client = client,
-        .region = self.options.region,
+        .region = try self.options.region.region(),
     };
     const call = try aws.Request(services.lambda.invoke).call(.{
         .function_name = self.options.name,

@@ -1,4 +1,5 @@
 const std = @import("std");
+const Region = @import("Region.zig");
 const aws = @import("aws").aws;
 
 const Deploy = @This();
@@ -22,7 +23,7 @@ pub const Options = struct {
     iam_step: *@import("Iam.zig"),
 
     /// Region for deployment
-    region: []const u8,
+    region: *Region,
 };
 
 pub fn create(owner: *std.Build, options: Options) *Deploy {
@@ -92,7 +93,7 @@ fn make(step: *std.Build.Step, node: std.Progress.Node) anyerror!void {
         const options = aws.Options{
             .client = client,
             .diagnostics = &diagnostics,
-            .region = self.options.region,
+            .region = try self.options.region.region(),
         };
 
         aws.globalLogControl(.info, .warn, .info, true);
@@ -128,7 +129,7 @@ fn make(step: *std.Build.Step, node: std.Progress.Node) anyerror!void {
     const base64_bytes = encoder.encode(base64_buf, bytes);
     const options = aws.Options{
         .client = client,
-        .region = self.options.region,
+        .region = try self.options.region.region(),
     };
     const arm64_arch = [_][]const u8{"arm64"};
     const x86_64_arch = [_][]const u8{"x86_64"};

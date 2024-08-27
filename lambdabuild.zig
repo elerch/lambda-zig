@@ -93,7 +93,10 @@ pub fn configureBuild(b: *std.Build, exe: *std.Build.Step.Compile, function_name
     const iam_step = b.step("awslambda_iam", "Create/Get IAM role for function");
     iam_step.dependOn(&iam.step);
 
-    const region = b.option([]const u8, "region", "Region to use [default is autodetect from environment/config]") orelse try findRegionFromSystem(b.allocator);
+    var region = @import("lambdabuild/Region.zig"){
+        .allocator = b.allocator,
+        .specified_region = b.option([]const u8, "region", "Region to use [default is autodetect from environment/config]"),
+    };
 
     // Deployment
     const deploy = Deploy.create(b, .{
@@ -101,7 +104,7 @@ pub fn configureBuild(b: *std.Build, exe: *std.Build.Step.Compile, function_name
         .package = package_step.packagedFileLazyPath(),
         .arch = exe.root_module.resolved_target.?.result.cpu.arch,
         .iam_step = iam,
-        .region = region,
+        .region = &region,
     });
     deploy.step.dependOn(&package_step.step);
 
@@ -115,7 +118,7 @@ pub fn configureBuild(b: *std.Build, exe: *std.Build.Step.Compile, function_name
     const invoke = Invoke.create(b, .{
         .name = function_name,
         .payload = payload,
-        .region = region,
+        .region = &region,
     });
     invoke.step.dependOn(&deploy.step);
     const run_step = b.step("awslambda_run", "Run the app in AWS lambda");
