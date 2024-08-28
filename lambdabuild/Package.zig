@@ -3,7 +3,12 @@ const std = @import("std");
 const Package = @This();
 
 step: std.Build.Step,
-lambda_zipfile: []const u8,
+options: Options,
+
+/// This is set as part of the make phase, and is the location in the cache
+/// for the lambda package. The package will also be copied to the output
+/// directory, but this location makes for a good cache key for deployments
+zipfile_dest: ?[]const u8 = null,
 
 const base_id: std.Build.Step.Id = .install_file;
 
@@ -28,38 +33,9 @@ pub fn create(owner: *std.Build, options: Options) *Package {
             .owner = owner,
             .makeFn = make,
         }),
-        .lambda_zipfile = options.zipfile_name,
+        .options = options,
     };
 
-    // TODO: For Windows, tar.exe can actually do zip files. tar -a -cf function.zip file1 [file2...]
-    // https://superuser.com/questions/201371/create-zip-folder-from-the-command-line-windows#comment2725283_898508
-    //
-    // We'll want two system commands here. One for the exe itself, and one for
-    // other files (TODO: what does this latter one look like? maybe it's an option?)
-    var zip_cmd = owner.addSystemCommand(&.{ "zip", "-qj9X" });
-    zip_cmd.has_side_effects = true; // TODO: move these to makeFn as we have little cache control here...
-    zip_cmd.setCwd(.{ .src_path = .{
-        .owner = owner,
-        .sub_path = owner.getInstallPath(.prefix, "."),
-    } });
-    const zipfile = zip_cmd.addOutputFileArg(options.zipfile_name);
-    zip_cmd.addArg(owner.getInstallPath(.bin, "bootstrap"));
-    // std.debug.print("\nzip cmdline: {s}", .{zip});
-    if (!std.mem.eql(u8, "bootstrap", options.exe.out_filename)) {
-        // We need to copy stuff around
-        // TODO: should this be installing bootstrap binary in .bin directory?
-        const cp_cmd = owner.addSystemCommand(&.{ "cp", owner.getInstallPath(.bin, options.exe.out_filename) });
-        cp_cmd.has_side_effects = true;
-        const copy_output = cp_cmd.addOutputFileArg("bootstrap");
-        const install_copy = owner.addInstallFileWithDir(copy_output, .bin, "bootstrap");
-        cp_cmd.step.dependOn(owner.getInstallStep());
-        zip_cmd.step.dependOn(&install_copy.step);
-        // might as well leave this bootstrap around for caching purposes
-        // const rm_cmd = owner.addSystemCommand(&.{ "rm", owner.getInstallPath(.bin, "bootstrap"), });
-    }
-    const install_zipfile = owner.addInstallFileWithDir(zipfile, .prefix, options.zipfile_name);
-    install_zipfile.step.dependOn(&zip_cmd.step);
-    package.step.dependOn(&install_zipfile.step);
     return package;
 }
 
@@ -69,26 +45,92 @@ pub fn packagedFilePath(self: Package) []const u8 {
 pub fn packagedFileLazyPath(self: Package) std.Build.LazyPath {
     return .{ .src_path = .{
         .owner = self.step.owner,
-        .sub_path = self.step.owner.getInstallPath(.prefix, self.lambda_zipfile),
+        .sub_path = self.step.owner.getInstallPath(.prefix, self.options.zipfile_name),
     } };
 }
 
 fn make(step: *std.Build.Step, node: std.Progress.Node) anyerror!void {
-    // Make here doesn't actually do anything. But we want to set up this
-    // step this way, so that when (if) zig stdlib gains the abiltity to write
-    // zip files in addition to reading them, we can skip all the system commands
-    // and just do all the things here instead
-    //
-    //
-    // TODO: The caching plan will be:
-    //
-    // get a hash of the bootstrap and whatever other files we put into the zip
-    // file (because a zip is not really reproducible). If the cache directory
-    // has the hash as its latest hash, we have nothing to do, so we can exit
-    // at that point
-    //
-    // Otherwise, store that hash in our cache, and copy our bootstrap, zip
-    // things up and install the file into zig-out
     _ = node;
-    _ = step;
+    const self: *Package = @fieldParentPtr("step", step);
+    // get a hash of the bootstrap and whatever other files we put into the zip
+    // file (because a zip is not really reproducible). That hash becomes the
+    // cache directory, similar to the way rest of zig works
+    //
+    // Otherwise, create the package in our cache indexed by hash, and copy
+    // our bootstrap, zip things up and install the file into zig-out
+    const bootstrap = bootstrapLocation(self.*) catch |e| {
+        if (@errorReturnTrace()) |trace| {
+            std.debug.dumpStackTrace(trace.*);
+        }
+        return step.fail("Could not copy output to bootstrap: {}", .{e});
+    };
+    const bootstrap_dirname = std.fs.path.dirname(bootstrap).?;
+    const zipfile_src = try std.fs.path.join(step.owner.allocator, &[_][]const u8{ bootstrap_dirname, self.options.zipfile_name });
+    self.zipfile_dest = self.step.owner.getInstallPath(.prefix, self.options.zipfile_name);
+    if (std.fs.copyFileAbsolute(zipfile_src, self.zipfile_dest.?, .{})) |_| {
+        // we're good here. The zip file exists in cache and has been copied
+        step.result_cached = true;
+    } else |_| {
+        // error, but this is actually the normal case. We will zip the file
+        // using system zip and store that in cache with the output file for later
+        // use
+
+        // TODO: For Windows, tar.exe can actually do zip files.
+        // tar -a -cf function.zip file1 [file2...]
+        //
+        // See: https://superuser.com/questions/201371/create-zip-folder-from-the-command-line-windows#comment2725283_898508
+        var child = std.process.Child.init(&[_][]const u8{
+            "zip",
+            "-qj9X",
+            zipfile_src,
+            bootstrap,
+        }, self.step.owner.allocator);
+        child.stdout_behavior = .Ignore;
+        child.stdin_behavior = .Ignore; // we'll allow stderr through
+        switch (try child.spawnAndWait()) {
+            .Exited => |rc| if (rc != 0) return step.fail("Non-zero exit code {} from zip", .{rc}),
+            .Signal, .Stopped, .Unknown => return step.fail("Abnormal termination from zip step", .{}),
+        }
+
+        try std.fs.copyFileAbsolute(zipfile_src, self.zipfile_dest.?, .{}); // It better be there now
+    }
+}
+
+fn bootstrapLocation(package: Package) ![]const u8 {
+    const output = package.step.owner.getInstallPath(.bin, package.options.exe.out_filename);
+    // We will always copy the output file, mainly because we also need the hash...
+    // if (std.mem.eql(u8, "bootstrap", package.options.exe.out_filename))
+    //     return output; // easy path
+
+    // Not so easy...read the file, get a hash of contents, see if it's in cache
+    const output_file = try std.fs.openFileAbsolute(output, .{});
+    defer output_file.close();
+    const output_bytes = try output_file.readToEndAlloc(package.step.owner.allocator, 100 * 1024 * 1024); // 100MB file
+    // std.Build.Cache.Hasher
+    // std.Buidl.Cache.hasher_init
+    var hasher = std.Build.Cache.HashHelper{}; // We'll reuse the same file hasher from cache
+    hasher.addBytes(output_bytes);
+    const hash = std.fmt.bytesToHex(hasher.hasher.finalResult(), .lower);
+    const dest_path = try package.step.owner.cache_root.join(
+        package.step.owner.allocator,
+        &[_][]const u8{ "p", hash[0..], "bootstrap" },
+    );
+    const dest_file = std.fs.openFileAbsolute(dest_path, .{}) catch null;
+    if (dest_file) |d| {
+        d.close();
+        return dest_path;
+    }
+    const pkg_path = try package.step.owner.cache_root.join(
+        package.step.owner.allocator,
+        &[_][]const u8{"p"},
+    );
+    // Destination file does not exist. Write the bootstrap (after creating the directory)
+    std.fs.makeDirAbsolute(pkg_path) catch |e| {
+        std.debug.print("Could not mkdir {?s}: {}\n", .{ std.fs.path.dirname(dest_path), e });
+    };
+    std.fs.makeDirAbsolute(std.fs.path.dirname(dest_path).?) catch {};
+    const write_file = try std.fs.createFileAbsolute(dest_path, .{});
+    defer write_file.close();
+    try write_file.writeAll(output_bytes);
+    return dest_path;
 }
