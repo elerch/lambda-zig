@@ -13,14 +13,14 @@ pub const Options = struct {
     /// Function name to be used for the function
     name: []const u8,
 
-    /// LazyPath for the function package (zip file)
-    package: std.Build.LazyPath,
-
     /// Architecture for Lambda function
     arch: std.Target.Cpu.Arch,
 
     /// Iam step. This will be a dependency of the deployment
     iam_step: *@import("Iam.zig"),
+
+    /// Packaging step. This will be a dependency of the deployment
+    package_step: *@import("Package.zig"),
 
     /// Region for deployment
     region: *Region,
@@ -30,7 +30,7 @@ pub fn create(owner: *std.Build, options: Options) *Deploy {
     const name = owner.dupe(options.name);
     const step_name = owner.fmt("{s} {s}{s}", .{
         "aws lambda",
-        "deploy",
+        "deploy ",
         name,
     });
     const self = owner.allocator.create(Deploy) catch @panic("OOM");
@@ -45,6 +45,7 @@ pub fn create(owner: *std.Build, options: Options) *Deploy {
     };
 
     self.step.dependOn(&options.iam_step.step);
+    self.step.dependOn(&options.package_step.step);
     return self;
 }
 
@@ -73,13 +74,12 @@ fn make(step: *std.Build.Step, node: std.Progress.Node) anyerror!void {
     if (self.options.arch != .aarch64 and self.options.arch != .x86_64)
         return step.fail("AWS Lambda can only deploy aarch64 and x86_64 functions ({} not allowed)", .{self.options.arch});
 
-    // TODO: Work out cache. HOWEVER...this cannot be done until the caching
-    //       for the Deploy command works properly. Right now, it regenerates
-    //       the zip file every time
-    // if (try getIamArnFromName(step, self.options.role_name)) |_| {
-    //     step.result_cached = true;
-    //     return; // exists in cache - nothing to do
-    // }
+    const last_packaged_sha256 = blk: {
+        // file should always be there, but we shouldn't break if the cache doesn't exist
+        const last_deployed_id_file = std.fs.openFileAbsolute(try self.options.package_step.shasumFilePath(), .{}) catch break :blk null;
+        defer last_deployed_id_file.close();
+        break :blk try last_deployed_id_file.readToEndAlloc(step.owner.allocator, 2048);
+    };
 
     var client = aws.Client.init(self.step.owner.allocator, .{});
     defer client.deinit();
@@ -112,17 +112,22 @@ fn make(step: *std.Build.Step, node: std.Progress.Node) anyerror!void {
         };
         defer call.deinit();
 
-        // TODO: Write call.response.configuration.last_modified to cache
-
-        // std.debug.print("Function found. Last modified: {s}, revision id: {s}\n", .{ call.response.configuration.?.last_modified.?, call.response.configuration.?.revision_id.? });
         break :blk .{
             .last_modified = try step.owner.allocator.dupe(u8, call.response.configuration.?.last_modified.?),
             .revision_id = try step.owner.allocator.dupe(u8, call.response.configuration.?.revision_id.?),
+            .sha256 = try step.owner.allocator.dupe(u8, call.response.configuration.?.code_sha256.?),
         };
     };
 
+    if (last_packaged_sha256) |s|
+        if (function) |f|
+            if (std.mem.eql(u8, s, f.sha256)) {
+                step.result_cached = true;
+                return;
+            };
+
     const encoder = std.base64.standard.Encoder;
-    const file = try std.fs.openFileAbsolute(self.options.package.getPath2(step.owner, step), .{});
+    const file = try std.fs.openFileAbsolute(self.options.package_step.packagedFileLazyPath().getPath2(step.owner, step), .{});
     defer file.close();
     const bytes = try file.readToEndAlloc(step.owner.allocator, 100 * 1024 * 1024);
     const base64_buf = try step.owner.allocator.alloc(u8, encoder.calcSize(bytes.len));
@@ -144,8 +149,6 @@ fn make(step: *std.Build.Step, node: std.Progress.Node) anyerror!void {
             .zip_file = base64_bytes,
         }, options);
         defer update_call.deinit();
-        // TODO: Write call.response.last_modified to cache
-        // TODO: Write call.response.revision_id to cache?
     } else {
         // New function - we need to create from scratch
         const create_call = try aws.Request(services.lambda.create_function).call(.{

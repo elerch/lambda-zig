@@ -102,12 +102,11 @@ pub fn configureBuild(b: *std.Build, exe: *std.Build.Step.Compile, function_name
     // Deployment
     const deploy = Deploy.create(b, .{
         .name = function_name,
-        .package = package_step.packagedFileLazyPath(),
         .arch = exe.root_module.resolved_target.?.result.cpu.arch,
         .iam_step = iam,
+        .package_step = package_step,
         .region = region,
     });
-    deploy.step.dependOn(&package_step.step);
 
     const deploy_step = b.step("awslambda_deploy", "Deploy the function");
     deploy_step.dependOn(&deploy.step);

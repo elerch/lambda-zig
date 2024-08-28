@@ -8,6 +8,8 @@ options: Options,
 /// This is set as part of the make phase, and is the location in the cache
 /// for the lambda package. The package will also be copied to the output
 /// directory, but this location makes for a good cache key for deployments
+zipfile_cache_dest: ?[]const u8 = null,
+
 zipfile_dest: ?[]const u8 = null,
 
 const base_id: std.Build.Step.Id = .install_file;
@@ -38,7 +40,13 @@ pub fn create(owner: *std.Build, options: Options) *Package {
 
     return package;
 }
-
+pub fn shasumFilePath(self: Package) ![]const u8 {
+    return try std.fmt.allocPrint(
+        self.step.owner.allocator,
+        "{s}{s}{s}",
+        .{ std.fs.path.dirname(self.zipfile_cache_dest.?).?, std.fs.path.sep_str, "sha256sum.txt" },
+    );
+}
 pub fn packagedFilePath(self: Package) []const u8 {
     return self.step.owner.getInstallPath(.prefix, self.options.zipfile_name);
 }
@@ -66,6 +74,7 @@ fn make(step: *std.Build.Step, node: std.Progress.Node) anyerror!void {
     };
     const bootstrap_dirname = std.fs.path.dirname(bootstrap).?;
     const zipfile_src = try std.fs.path.join(step.owner.allocator, &[_][]const u8{ bootstrap_dirname, self.options.zipfile_name });
+    self.zipfile_cache_dest = zipfile_src;
     self.zipfile_dest = self.step.owner.getInstallPath(.prefix, self.options.zipfile_name);
     if (std.fs.copyFileAbsolute(zipfile_src, self.zipfile_dest.?, .{})) |_| {
         // we're good here. The zip file exists in cache and has been copied
@@ -93,6 +102,21 @@ fn make(step: *std.Build.Step, node: std.Progress.Node) anyerror!void {
         }
 
         try std.fs.copyFileAbsolute(zipfile_src, self.zipfile_dest.?, .{}); // It better be there now
+
+        // One last thing. We want to get a Sha256 sum of the zip file, and
+        // store it in cache. This will help the deployment process compare
+        // to what's out in AWS, since revision id is apparently trash for these
+        // purposes
+        const zipfile = try std.fs.openFileAbsolute(zipfile_src, .{});
+        defer zipfile.close();
+        const zip_bytes = try zipfile.readToEndAlloc(step.owner.allocator, 100 * 1024 * 1024);
+        var hash: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(zip_bytes, &hash, .{});
+        const base64 = std.base64.standard.Encoder;
+        var encoded: [base64.calcSize(std.crypto.hash.sha2.Sha256.digest_length)]u8 = undefined;
+        const shaoutput = try std.fs.createFileAbsolute(try self.shasumFilePath(), .{});
+        defer shaoutput.close();
+        try shaoutput.writeAll(base64.encode(encoded[0..], hash[0..]));
     }
 }
 
