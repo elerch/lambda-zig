@@ -30,8 +30,6 @@ Caveats:
   of zip file creation capabilities in the standard library (you can read, but
   not write, zip files with the standard library). A TODO exists with more
   information should you wish to file a PR.
-* Caching is not yet implemented in the package or deployment steps, so the
-  function will be deployed on every build
 
 A sample project using this runtime can be found at https://git.lerch.org/lobo/lambda-zig-sample
 
