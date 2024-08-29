@@ -149,9 +149,7 @@ fn bootstrapLocation(package: Package) ![]const u8 {
         &[_][]const u8{"p"},
     );
     // Destination file does not exist. Write the bootstrap (after creating the directory)
-    std.fs.makeDirAbsolute(pkg_path) catch |e| {
-        std.debug.print("Could not mkdir {?s}: {}\n", .{ std.fs.path.dirname(dest_path), e });
-    };
+    std.fs.makeDirAbsolute(pkg_path) catch {};
     std.fs.makeDirAbsolute(std.fs.path.dirname(dest_path).?) catch {};
     const write_file = try std.fs.createFileAbsolute(dest_path, .{});
     defer write_file.close();
