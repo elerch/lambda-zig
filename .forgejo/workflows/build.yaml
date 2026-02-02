@@ -1,0 +1,37 @@
+name: Lambda-Zig Build
+run-name: ${{ github.actor }} building lambda-zig
+on:
+  push:
+    branches:
+      - '*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: https://codeberg.org/mlugg/setup-zig@v2.2.1
+
+      - name: Build
+        run: zig build --summary all
+
+      - name: Run tests
+        run: zig build test --summary all
+
+      - name: Build for other platforms
+        run: |
+          zig build -Dtarget=aarch64-linux
+          zig build -Dtarget=x86_64-linux
+
+      - name: Notify
+        uses: https://git.lerch.org/lobo/action-notify-ntfy@v2
+        if: always()
+        with:
+          host: ${{ secrets.NTFY_HOST }}
+          topic: ${{ secrets.NTFY_TOPIC }}
+          user: ${{ secrets.NTFY_USER }}
+          password: ${{ secrets.NTFY_PASSWORD }}
