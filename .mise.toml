@@ -1,0 +1,5 @@
+[tools]
+pre-commit = "4.2.0"
+zig = "0.15.2"
+zls = "0.15.1"
+"ubi:DonIsaac/zlint" = "0.7.6"

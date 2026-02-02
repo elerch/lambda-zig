@@ -1,0 +1,36 @@
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v3.2.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+  - repo: https://github.com/batmac/pre-commit-zig
+    rev: v0.3.0
+    hooks:
+      - id: zig-fmt
+  - repo: local
+    hooks:
+      - id: zlint
+        name: Run zlint
+        entry: zlint
+        args: ["--deny-warnings", "--fix"]
+        language: system
+        types: [zig]
+  - repo: https://github.com/batmac/pre-commit-zig
+    rev: v0.3.0
+    hooks:
+      - id: zig-build
+  - repo: local
+    hooks:
+      - id: test
+        name: Run zig build test
+        entry: zig
+        # args: ["build", "coverage", "-Dcoverage-threshold=80"]
+        args: ["build", "test"]
+        language: system
+        types: [file]
+        pass_filenames: false

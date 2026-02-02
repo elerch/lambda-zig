@@ -1,70 +1,77 @@
 lambda-zig: A Custom Runtime for AWS Lambda
 ===========================================
 
-This is a sample custom runtime built in zig (0.13). Simple projects will execute
-in <1ms, with a cold start init time of approximately 11ms.
+This is a custom runtime built in Zig (0.15). Simple projects will
+execute in <1ms, with a cold start init time of approximately 11ms.
 
-Some custom build steps have been added to build.zig, which will only currently appear if compiling from a linux operating system:
+Custom build steps are available for packaging and deploying Lambda functions:
 
-* `zig build awslambda_iam`: Deploy and record a default IAM role for the lambda function
-* `zig build awslambda_package`: Package the lambda function for upload
-* `zig build awslambda_deploy`: Deploy the lambda function
-* `zig build awslambda_run`: Run the lambda function
+* `zig build awslambda_package`: Package the Lambda function into a zip file
+* `zig build awslambda_iam`: Create or verify IAM role for the Lambda function
+* `zig build awslambda_deploy`: Deploy the Lambda function to AWS
+* `zig build awslambda_run`: Invoke the deployed Lambda function
 
-Custom options:
+Build options:
 
-* **function-name**: set the name of the AWS Lambda function
-* **payload**: Use this to set the payload of the function when run using `zig build awslambda_run`
-* **region**: Use this to set the region for the function deployment/run
-* **function-role**: Name of the role to use for the function. The system will
-                     look up the arn from this name, and create if it does not exist
-* **function-arn**: Role arn to use with the function. This must exist
+* **function-name**: Name of the AWS Lambda function
+* **payload**: JSON payload for function invocation (used with awslambda_run)
+* **region**: AWS region for deployment and invocation
+* **profile**: AWS profile to use for credentials
+* **role-name**: IAM role name for the function (default: lambda_basic_execution)
 
-The AWS Lambda function can be compiled as a linux x86_64 or linux aarch64
-executable. The build script will set the architecture appropriately
+The Lambda function can be compiled for x86_64 or aarch64. The build system
+automatically configures the Lambda architecture based on the target.
 
-Caveats:
+A sample project using this runtime can be found at
+https://git.lerch.org/lobo/lambda-zig-sample
 
-* Building on Windows will not yet work, as the package step still uses
-  system commands due to the need to create a zip file, and the current lack
-  of zip file creation capabilities in the standard library (you can read, but
-  not write, zip files with the standard library). A TODO exists with more
-  information should you wish to file a PR.
-
-A sample project using this runtime can be found at https://git.lerch.org/lobo/lambda-zig-sample
-
-Using the zig package manager
+Using the Zig Package Manager
 -----------------------------
 
-The zig package manager [works just fine](https://github.com/ziglang/zig/issues/14279)
-in build.zig, which works well for use of this runtime.
+To add Lambda package/deployment steps to another project:
 
-To add lambda package/deployment steps to another project:
+1. Fetch the dependency:
 
-1. `zig build init-exe`
-2. Add a `build.zig.zon` similar to the below
-3. Add a line to build.zig to add necessary build options, etc. Not the build function
-   return type should be changed from `void` to `!void`
-
-`build.zig`:
-
-```zig
-try @import("lambda-zig").lambdaBuildOptions(b, exe);
+```sh
+zig fetch --save git+https://git.lerch.org/lobo/lambda-zig
 ```
 
-`build.zig.zon`:
+2. Update your `build.zig`:
 
 ```zig
-.{
-    .name = "lambda-zig",
-    .version = "0.1.0",
-    .dependencies = .{
-        .@"lambda-zig" = .{
-            .url = "https://git.lerch.org/lobo/lambda-zig/archive/fa13a08c4d91034a9b19d85f8c4c0af4cedaa67e.tar.gz",
-            .hash = "122037c357f834ffddf7b3a514f55edd5a4d7a3cde138a4021b6ac51be8fd2926000",
-        },
-    },
+const std = @import("std");
+const lambda_zig = @import("lambda_zig");
+
+pub fn build(b: *std.Build) !void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
+    // Get lambda-zig dependency
+    const lambda_zig_dep = b.dependency("lambda_zig", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const exe_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Add lambda runtime to your module
+    exe_module.addImport("aws_lambda_runtime", lambda_zig_dep.module("lambda_runtime"));
+
+    const exe = b.addExecutable(.{
+        .name = "bootstrap",
+        .root_module = exe_module,
+    });
+
+    b.installArtifact(exe);
+
+    // Add Lambda build steps
+    try lambda_zig.configureBuild(b, lambda_zig_dep, exe);
 }
 ```
 
-That's it! Now you should have the 4 custom build steps
+Note: The build function return type must be `!void` or catch/deal with errors
+to support the Lambda build integration.

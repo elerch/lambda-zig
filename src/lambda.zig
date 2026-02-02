@@ -130,28 +130,51 @@ const Event = struct {
         //       non-ssl), this shouldn't be a big issue
         var cl = std.http.Client{ .allocator = self.allocator };
         defer cl.deinit();
-        const res = cl.fetch(.{
-            .method = .POST,
-            .payload = content_fmt,
-            .location = .{ .uri = err_uri },
+
+        var req = cl.request(.POST, err_uri, .{
             .extra_headers = &.{
                 .{
                     .name = "Lambda-Runtime-Function-Error-Type",
                     .value = "HandlerReturned",
                 },
             },
-        }) catch |post_err| { // Well, at this point all we can do is shout at the void
-            log.err("Error posting response (start) for request id {s}: {}", .{ self.request_id, post_err });
+        }) catch |req_err| {
+            log.err("Error creating request for request id {s}: {}", .{ self.request_id, req_err });
             std.posix.exit(1);
         };
-        // TODO: Determine why this post is not returning
-        if (res.status != .ok) {
+        defer req.deinit();
+
+        req.transfer_encoding = .{ .content_length = content_fmt.len };
+        var body_writer = req.sendBodyUnflushed(&.{}) catch |send_err| {
+            log.err("Error sending body for request id {s}: {}", .{ self.request_id, send_err });
+            std.posix.exit(1);
+        };
+        body_writer.writer.writeAll(content_fmt) catch |write_err| {
+            log.err("Error writing body for request id {s}: {}", .{ self.request_id, write_err });
+            std.posix.exit(1);
+        };
+        body_writer.end() catch |end_err| {
+            log.err("Error ending body for request id {s}: {}", .{ self.request_id, end_err });
+            std.posix.exit(1);
+        };
+        req.connection.?.flush() catch |flush_err| {
+            log.err("Error flushing for request id {s}: {}", .{ self.request_id, flush_err });
+            std.posix.exit(1);
+        };
+
+        var redirect_buffer: [1024]u8 = undefined;
+        const response = req.receiveHead(&redirect_buffer) catch |recv_err| {
+            log.err("Error receiving response for request id {s}: {}", .{ self.request_id, recv_err });
+            std.posix.exit(1);
+        };
+
+        if (response.head.status != .ok) {
             // Documentation says something about "exit immediately". The
             // Lambda infrastrucutre restarts, so it's unclear if that's necessary.
             // It seems as though a continue should be fine, and slightly faster
             log.err("Post fail: {} {s}", .{
-                @intFromEnum(res.status),
-                res.status.phrase() orelse "",
+                @intFromEnum(response.head.status),
+                response.head.reason,
             });
             std.posix.exit(1);
         }
@@ -165,20 +188,31 @@ const Event = struct {
             .{ prefix, lambda_runtime_uri, postfix, self.request_id },
         );
         defer self.allocator.free(response_url);
+        const response_uri = try std.Uri.parse(response_url);
+
         var cl = std.http.Client{ .allocator = self.allocator };
         defer cl.deinit();
+
         // Lambda does different things, depending on the runtime. Go 1.x takes
         // any return value but escapes double quotes. Custom runtimes can
         // do whatever they want. node I believe wraps as a json object. We're
         // going to leave the return value up to the handler, and they can
         // use a seperate API for normalization so we're explicit. As a result,
         // we can just post event_response completely raw here
-        const res = try cl.fetch(.{
-            .method = .POST,
-            .payload = event_response,
-            .location = .{ .url = response_url },
-        });
-        if (res.status != .ok) return error.UnexpectedStatusFromPostResponse;
+
+        var req = try cl.request(.POST, response_uri, .{});
+        defer req.deinit();
+
+        req.transfer_encoding = .{ .content_length = event_response.len };
+        var body_writer = try req.sendBodyUnflushed(&.{});
+        try body_writer.writer.writeAll(event_response);
+        try body_writer.end();
+        try req.connection.?.flush();
+
+        var redirect_buffer: [1024]u8 = undefined;
+        const response = try req.receiveHead(&redirect_buffer);
+
+        if (response.head.status != .ok) return error.UnexpectedStatusFromPostResponse;
     }
 };
 
@@ -189,30 +223,32 @@ fn getEvent(allocator: std.mem.Allocator, event_data_uri: std.Uri) !?Event {
     //       non-ssl), this shouldn't be a big issue
     var cl = std.http.Client{ .allocator = allocator };
     defer cl.deinit();
-    var response_bytes = std.ArrayList(u8).init(allocator);
-    defer response_bytes.deinit();
-    var server_header_buffer: [16 * 1024]u8 = undefined;
+
     // Lambda freezes the process at this line of code. During warm start,
     // the process will unfreeze and data will be sent in response to client.get
-    var res = try cl.fetch(.{
-        .server_header_buffer = &server_header_buffer,
-        .location = .{ .uri = event_data_uri },
-        .response_storage = .{ .dynamic = &response_bytes },
-    });
-    if (res.status != .ok) {
+    var req = try cl.request(.GET, event_data_uri, .{});
+    defer req.deinit();
+
+    try req.sendBodiless();
+
+    var redirect_buffer: [0]u8 = undefined;
+    var response = try req.receiveHead(&redirect_buffer);
+
+    if (response.head.status != .ok) {
         // Documentation says something about "exit immediately". The
         // Lambda infrastrucutre restarts, so it's unclear if that's necessary.
         // It seems as though a continue should be fine, and slightly faster
         // std.os.exit(1);
         log.err("Lambda server event response returned bad error code: {} {s}", .{
-            @intFromEnum(res.status),
-            res.status.phrase() orelse "",
+            @intFromEnum(response.head.status),
+            response.head.reason,
         });
         return error.EventResponseNotOkResponse;
     }
 
+    // Extract request ID from response headers
     var request_id: ?[]const u8 = null;
-    var header_it = std.http.HeaderIterator.init(server_header_buffer[0..]);
+    var header_it = response.head.iterateHeaders();
     while (header_it.next()) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, "Lambda-Runtime-Aws-Request-Id"))
             request_id = h.value;
@@ -234,9 +270,30 @@ fn getEvent(allocator: std.mem.Allocator, event_data_uri: std.Uri) !?Event {
     const req_id = request_id.?;
     log.debug("got lambda request with id {s}", .{req_id});
 
+    // Read response body using a transfer buffer
+    var transfer_buffer: [64 * 1024]u8 = undefined;
+    const body_reader = response.reader(&transfer_buffer);
+
+    // Read all data into an allocated buffer
+    // We use content_length if available, otherwise read chunks
+    const content_len = response.head.content_length orelse (10 * 1024 * 1024); // 10MB max if not specified
+    var event_data = try allocator.alloc(u8, content_len);
+    errdefer allocator.free(event_data);
+
+    var total_read: usize = 0;
+    while (total_read < content_len) {
+        const remaining = event_data[total_read..];
+        const bytes_read = body_reader.readSliceShort(remaining) catch |err| switch (err) {
+            error.ReadFailed => return error.ReadFailed,
+        };
+        if (bytes_read == 0) break;
+        total_read += bytes_read;
+    }
+    event_data = try allocator.realloc(event_data, total_read);
+
     return Event.init(
         allocator,
-        try response_bytes.toOwnedSlice(),
+        event_data,
         try allocator.dupe(u8, req_id),
     );
 }
@@ -281,15 +338,6 @@ fn threadMain(allocator: std.mem.Allocator) !void {
     // when it's time to shut down
     while (server_remaining_requests > 0) {
         server_remaining_requests -= 1;
-        // defer {
-        //     if (!arena.reset(.{ .retain_capacity = {} })) {
-        //         // reallocation failed, arena is degraded
-        //         log.warn("Arena reset failed and is degraded. Resetting arena", .{});
-        //         arena.deinit();
-        //         arena = std.heap.ArenaAllocator.init(allocator);
-        //         aa = arena.allocator();
-        //     }
-        // }
 
         processRequest(aa, &http_server) catch |e| {
             log.err("Unexpected error processing request: {any}", .{e});
@@ -312,42 +360,54 @@ fn processRequest(allocator: std.mem.Allocator, server: *std.net.Server) !void {
     server_ready = false;
 
     var read_buffer: [1024 * 16]u8 = undefined;
-    var http_server = std.http.Server.init(connection, &read_buffer);
+    var write_buffer: [1024 * 16]u8 = undefined;
+    var stream_reader = std.net.Stream.Reader.init(connection.stream, &read_buffer);
+    var stream_writer = std.net.Stream.Writer.init(connection.stream, &write_buffer);
 
-    if (http_server.state == .ready) {
-        var request = http_server.receiveHead() catch |err| switch (err) {
-            error.HttpConnectionClosing => return,
-            else => {
-                std.log.err("closing http connection: {s}", .{@errorName(err)});
-                std.log.debug("Error occurred from this request: \n{s}", .{read_buffer[0..http_server.read_buffer_len]});
-                return;
-            },
-        };
-        server_request_aka_lambda_response = try (try request.reader()).readAllAlloc(allocator, std.math.maxInt(usize));
-        var respond_options = std.http.Server.Request.RespondOptions{};
-        const response_bytes = serve(allocator, request, &respond_options) catch |e| brk: {
-            respond_options.status = .internal_server_error;
-            // TODO: more about this particular request
-            log.err("Unexpected error from executor processing request: {any}", .{e});
-            if (@errorReturnTrace()) |trace| {
-                std.debug.dumpStackTrace(trace.*);
+    var http_server = std.http.Server.init(stream_reader.interface(), &stream_writer.interface);
+
+    const request = http_server.receiveHead() catch |err| switch (err) {
+        error.HttpConnectionClosing => return,
+        else => {
+            std.log.err("closing http connection: {s}", .{@errorName(err)});
+            return;
+        },
+    };
+
+    // Read request body if present
+    if (request.head.content_length) |content_len| {
+        if (content_len > 0) {
+            var body_transfer_buffer: [64 * 1024]u8 = undefined;
+            const body_reader = http_server.reader.bodyReader(&body_transfer_buffer, request.head.transfer_encoding, request.head.content_length);
+            var body_data = try allocator.alloc(u8, content_len);
+            errdefer allocator.free(body_data);
+            var total_read: usize = 0;
+            while (total_read < content_len) {
+                const remaining = body_data[total_read..];
+                const bytes_read = body_reader.readSliceShort(remaining) catch break;
+                if (bytes_read == 0) break;
+                total_read += bytes_read;
             }
-            break :brk "Unexpected error generating request to lambda";
-        };
-        try request.respond(response_bytes, respond_options);
-        log.debug(
-            "tid {d} (server): sent response: {s}",
-            .{ std.Thread.getCurrentId(), response_bytes },
-        );
+            server_request_aka_lambda_response = try allocator.realloc(body_data, total_read);
+        }
     }
+
+    // Build and send response
+    const response_bytes = serve();
+    var respond_request = request;
+    try respond_request.respond(response_bytes, .{
+        .extra_headers = &.{
+            .{ .name = "Lambda-Runtime-Aws-Request-Id", .value = "69" },
+        },
+    });
+
+    log.debug(
+        "tid {d} (server): sent response: {s}",
+        .{ std.Thread.getCurrentId(), response_bytes },
+    );
 }
 
-fn serve(allocator: std.mem.Allocator, request: std.http.Server.Request, respond_options: *std.http.Server.Request.RespondOptions) ![]const u8 {
-    _ = allocator;
-    _ = request;
-    respond_options.extra_headers = &.{
-        .{ .name = "Lambda-Runtime-Aws-Request-Id", .value = "69" },
-    };
+fn serve() []const u8 {
     return server_response;
 }
 
@@ -391,7 +451,7 @@ pub fn test_lambda_request(allocator: std.mem.Allocator, request: []const u8, re
     // when subsequent tests fail
     const server_thread = try startServer(aa); // start the server, get it ready
     while (!server_ready)
-        std.time.sleep(100);
+        std.Thread.sleep(100);
 
     log.debug("tid {d} (main): server reports ready", .{std.Thread.getCurrentId()});
     // we aren't testing the server,

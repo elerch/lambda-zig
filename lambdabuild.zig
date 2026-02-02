@@ -1,168 +1,112 @@
+//! Lambda Build Integration for Zig Build System
+//!
+//! This module provides build steps for packaging and deploying Lambda functions.
+//! It builds the lambda-build CLI tool and invokes it for each operation.
+
 const std = @import("std");
-const builtin = @import("builtin");
-const Package = @import("lambdabuild/Package.zig");
-const Iam = @import("lambdabuild/Iam.zig");
-const Deploy = @import("lambdabuild/Deploy.zig");
-const Invoke = @import("lambdabuild/Invoke.zig");
 
-fn fileExists(file_name: []const u8) bool {
-    const file = std.fs.openFileAbsolute(file_name, .{}) catch return false;
-    defer file.close();
-    return true;
-}
-fn addArgs(allocator: std.mem.Allocator, original: []const u8, args: [][]const u8) ![]const u8 {
-    var rc = original;
-    for (args) |arg| {
-        rc = try std.mem.concat(allocator, u8, &.{ rc, " ", arg });
-    }
-    return rc;
-}
-
-/// lambdaBuildSteps will add four build steps to the build (if compiling
-/// the code on a Linux host):
+/// Configure Lambda build steps for a Zig project.
 ///
-/// * awslambda_package:   Packages the function for deployment to Lambda
-///                        (dependencies are the zip executable and a shell)
-/// * awslambda_iam:       Gets an IAM role for the Lambda function, and creates it if it does not exist
-///                        (dependencies are the AWS CLI, grep and a shell)
-/// * awslambda_deploy:    Deploys the lambda function to a live AWS environment
-///                        (dependencies are the AWS CLI, and a shell)
-/// * awslambda_run:       Runs the lambda function in a live AWS environment
-///                        (dependencies are the AWS CLI, and a shell)
-///
-/// awslambda_run depends on deploy
-/// awslambda_deploy depends on iam and package
-///
-/// iam and package do not have any dependencies
-pub fn configureBuild(b: *std.Build, exe: *std.Build.Step.Compile, function_name: []const u8) !void {
-    // The rest of this function is currently reliant on the use of Linux
-    // system being used to build the lambda function
-    //
-    // It is likely that much of this will work on other Unix-like OSs, but
-    // we will work this out later
-    //
-    // TODO: support other host OSs
-    if (builtin.os.tag != .linux) return;
+/// Adds the following build steps:
+/// - awslambda_package: Package the function into a zip file
+/// - awslambda_iam: Create/verify IAM role
+/// - awslambda_deploy: Deploy the function to AWS
+/// - awslambda_run: Invoke the deployed function
+pub fn configureBuild(
+    b: *std.Build,
+    lambda_build_dep: *std.Build.Dependency,
+    exe: *std.Build.Step.Compile,
+) !void {
+    // Get the lambda-build CLI artifact from the dependency
+    const cli = lambda_build_dep.artifact("lambda-build");
 
-    @import("aws").aws.globalLogControl(.info, .warn, .info, false);
-    const package_step = Package.create(b, .{ .exe = exe });
-
-    const step = b.step("awslambda_package", "Package the function");
-    step.dependOn(&package_step.step);
-    package_step.step.dependOn(b.getInstallStep());
-
-    // Doing this will require that the aws dependency be added to the downstream
-    // build.zig.zon
-    // const lambdabuild = b.addExecutable(.{
-    //     .name = "lambdabuild",
-    //     .root_source_file = .{
-    //         // we use cwd_relative here because we need to compile this relative
-    //         // to whatever directory this file happens to be. That is likely
-    //         // in a cache directory, not the base of the build.
-    //         .cwd_relative = try std.fs.path.join(b.allocator, &[_][]const u8{
-    //             std.fs.path.dirname(@src().file).?,
-    //             "lambdabuild/src/main.zig",
-    //         }),
-    //     },
-    //     .target = b.host,
-    // });
-    // const aws_dep = b.dependency("aws", .{
-    //     .target = b.host,
-    //     .optimize = lambdabuild.root_module.optimize orelse .Debug,
-    // });
-    // const aws_module = aws_dep.module("aws");
-    // lambdabuild.root_module.addImport("aws", aws_module);
-    //
-
-    const iam_role_name = b.option(
+    // Get configuration options
+    const function_name = b.option([]const u8, "function-name", "Function name for Lambda") orelse "zig-fn";
+    const region = b.option([]const u8, "region", "AWS region") orelse null;
+    const profile = b.option([]const u8, "profile", "AWS profile") orelse null;
+    const role_name = b.option(
         []const u8,
-        "function-role",
-        "IAM role name for function (will create if it does not exist) [lambda_basic_execution]",
-    ) orelse "lambda_basic_execution_blah2";
-
-    const iam_role_arn = b.option(
+        "role-name",
+        "IAM role name (default: lambda_basic_execution)",
+    ) orelse "lambda_basic_execution";
+    const payload = b.option(
         []const u8,
-        "function-arn",
-        "Preexisting IAM role arn for function",
-    );
+        "payload",
+        "Lambda invocation payload",
+    ) orelse "{}";
 
-    const iam = Iam.create(b, .{
-        .role_name = iam_role_name,
-        .role_arn = iam_role_arn,
-    });
-    const iam_step = b.step("awslambda_iam", "Create/Get IAM role for function");
-    iam_step.dependOn(&iam.step);
-
-    const region = try b.allocator.create(@import("lambdabuild/Region.zig"));
-    region.* = .{
-        .allocator = b.allocator,
-        .specified_region = b.option([]const u8, "region", "Region to use [default is autodetect from environment/config]"),
+    // Determine architecture for Lambda
+    const target_arch = exe.root_module.resolved_target.?.result.cpu.arch;
+    const arch_str = blk: {
+        switch (target_arch) {
+            .aarch64 => break :blk "aarch64",
+            .x86_64 => break :blk "x86_64",
+            else => {
+                std.log.warn("Unsupported architecture for Lambda: {}, defaulting to x86_64", .{target_arch});
+                break :blk "x86_64";
+            },
+        }
     };
 
-    // Deployment
-    const deploy = Deploy.create(b, .{
-        .name = function_name,
-        .arch = exe.root_module.resolved_target.?.result.cpu.arch,
-        .iam_step = iam,
-        .package_step = package_step,
-        .region = region,
+    // Package step - output goes to cache based on input hash
+    const package_cmd = b.addRunArtifact(cli);
+    package_cmd.step.name = try std.fmt.allocPrint(b.allocator, "{s} package", .{cli.name});
+    package_cmd.addArgs(&.{ "package", "--exe" });
+    package_cmd.addFileArg(exe.getEmittedBin());
+    package_cmd.addArgs(&.{"--output"});
+    const zip_output = package_cmd.addOutputFileArg("function.zip");
+    package_cmd.step.dependOn(&exe.step);
+
+    const package_step = b.step("awslambda_package", "Package the Lambda function");
+    package_step.dependOn(&package_cmd.step);
+
+    // IAM step
+    const iam_cmd = b.addRunArtifact(cli);
+    iam_cmd.step.name = try std.fmt.allocPrint(b.allocator, "{s} iam", .{cli.name});
+    if (profile) |p| iam_cmd.addArgs(&.{ "--profile", p });
+    if (region) |r| iam_cmd.addArgs(&.{ "--region", r });
+    iam_cmd.addArgs(&.{ "iam", "--role-name", role_name });
+
+    const iam_step = b.step("awslambda_iam", "Create/verify IAM role for Lambda");
+    iam_step.dependOn(&iam_cmd.step);
+
+    // Deploy step (depends on package)
+    const deploy_cmd = b.addRunArtifact(cli);
+    deploy_cmd.step.name = try std.fmt.allocPrint(b.allocator, "{s} deploy", .{cli.name});
+    if (profile) |p| deploy_cmd.addArgs(&.{ "--profile", p });
+    if (region) |r| deploy_cmd.addArgs(&.{ "--region", r });
+    deploy_cmd.addArgs(&.{
+        "deploy",
+        "--function-name",
+        function_name,
+        "--zip-file",
     });
-
-    const deploy_step = b.step("awslambda_deploy", "Deploy the function");
-    deploy_step.dependOn(&deploy.step);
-
-    const payload = b.option([]const u8, "payload", "Lambda payload [{\"foo\":\"bar\", \"baz\": \"qux\"}]") orelse
-        \\ {"foo": "bar", "baz": "qux"}"
-    ;
-
-    const invoke = Invoke.create(b, .{
-        .name = function_name,
-        .payload = payload,
-        .region = region,
+    deploy_cmd.addFileArg(zip_output);
+    deploy_cmd.addArgs(&.{
+        "--role-name",
+        role_name,
+        "--arch",
+        arch_str,
     });
-    invoke.step.dependOn(&deploy.step);
-    const run_step = b.step("awslambda_run", "Run the app in AWS lambda");
-    run_step.dependOn(&invoke.step);
-}
+    deploy_cmd.step.dependOn(&package_cmd.step);
 
-// AWS_CONFIG_FILE (default is ~/.aws/config
-// AWS_DEFAULT_REGION
-fn findRegionFromSystem(allocator: std.mem.Allocator) ![]const u8 {
-    const env_map = try std.process.getEnvMap(allocator);
-    if (env_map.get("AWS_DEFAULT_REGION")) |r| return r;
-    const config_file_path = env_map.get("AWS_CONFIG_FILE") orelse
-        try std.fs.path.join(allocator, &[_][]const u8{
-        env_map.get("HOME") orelse env_map.get("USERPROFILE").?,
-        ".aws",
-        "config",
+    const deploy_step = b.step("awslambda_deploy", "Deploy the Lambda function");
+    deploy_step.dependOn(&deploy_cmd.step);
+
+    // Invoke/run step (depends on deploy)
+    const invoke_cmd = b.addRunArtifact(cli);
+    invoke_cmd.step.name = try std.fmt.allocPrint(b.allocator, "{s} invoke", .{cli.name});
+    if (profile) |p| invoke_cmd.addArgs(&.{ "--profile", p });
+    if (region) |r| invoke_cmd.addArgs(&.{ "--region", r });
+    invoke_cmd.addArgs(&.{
+        "invoke",
+        "--function-name",
+        function_name,
+        "--payload",
+        payload,
     });
-    const config_file = try std.fs.openFileAbsolute(config_file_path, .{});
-    defer config_file.close();
-    const config_bytes = try config_file.readToEndAlloc(allocator, 1024 * 1024);
-    const profile = env_map.get("AWS_PROFILE") orelse "default";
-    var line_iterator = std.mem.split(u8, config_bytes, "\n");
-    var in_profile = false;
-    while (line_iterator.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (trimmed.len == 0 or trimmed[0] == '#') continue;
-        if (!in_profile) {
-            if (trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') {
-                // this is a profile directive!
-                // std.debug.print("profile: {s}, in file: {s}\n", .{ profile, trimmed[1 .. trimmed.len - 1] });
-                if (std.mem.eql(u8, profile, trimmed[1 .. trimmed.len - 1])) {
-                    in_profile = true;
-                }
-            }
-            continue; // we're only looking for a profile at this point
-        }
-        // look for our region directive
-        if (trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']')
-            return error.RegionNotFound; // we've hit another profile without getting our region
-        if (!std.mem.startsWith(u8, trimmed, "region")) continue;
-        var equalityiterator = std.mem.split(u8, trimmed, "=");
-        _ = equalityiterator.next() orelse return error.RegionNotFound;
-        const raw_val = equalityiterator.next() orelse return error.RegionNotFound;
-        return try allocator.dupe(u8, std.mem.trimLeft(u8, raw_val, " \t"));
-    }
-    return error.RegionNotFound;
+    invoke_cmd.step.dependOn(&deploy_cmd.step);
+
+    const run_step = b.step("awslambda_run", "Invoke the deployed Lambda function");
+    run_step.dependOn(&invoke_cmd.step);
 }
