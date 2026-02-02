@@ -18,12 +18,60 @@ Build options:
 * **region**: AWS region for deployment and invocation
 * **profile**: AWS profile to use for credentials
 * **role-name**: IAM role name for the function (default: lambda_basic_execution)
+* **env-file**: Path to environment variables file for the Lambda function
 
 The Lambda function can be compiled for x86_64 or aarch64. The build system
 automatically configures the Lambda architecture based on the target.
 
 A sample project using this runtime can be found at
 https://git.lerch.org/lobo/lambda-zig-sample
+
+Environment Variables
+---------------------
+
+Lambda functions can be configured with environment variables during deployment.
+This is useful for passing configuration, secrets, or credentials to your function.
+
+### Using the build system
+
+Pass the `-Denv-file` option to specify a file containing environment variables:
+
+```sh
+zig build awslambda_deploy -Dfunction-name=my-function -Denv-file=.env
+```
+
+### Using the CLI directly
+
+The `lambda-build` CLI supports both `--env` flags and `--env-file`:
+
+```sh
+# Set individual variables
+./lambda-build deploy --function-name my-fn --zip-file function.zip \
+    --env DB_HOST=localhost --env DB_PORT=5432
+
+# Load from file
+./lambda-build deploy --function-name my-fn --zip-file function.zip \
+    --env-file .env
+
+# Combine both (--env values override --env-file)
+./lambda-build deploy --function-name my-fn --zip-file function.zip \
+    --env-file .env --env DEBUG=true
+```
+
+### Environment file format
+
+The environment file uses a simple `KEY=VALUE` format, one variable per line:
+
+```sh
+# Database configuration
+DB_HOST=localhost
+DB_PORT=5432
+
+# API keys
+API_KEY=secret123
+```
+
+Lines starting with `#` are treated as comments. Empty lines are ignored.
 
 Using the Zig Package Manager
 -----------------------------

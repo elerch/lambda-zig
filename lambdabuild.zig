@@ -34,6 +34,11 @@ pub fn configureBuild(
         "payload",
         "Lambda invocation payload",
     ) orelse "{}";
+    const env_file = b.option(
+        []const u8,
+        "env-file",
+        "Path to environment variables file (KEY=VALUE format)",
+    ) orelse null;
 
     // Determine architecture for Lambda
     const target_arch = exe.root_module.resolved_target.?.result.cpu.arch;
@@ -88,6 +93,7 @@ pub fn configureBuild(
         "--arch",
         arch_str,
     });
+    if (env_file) |ef| deploy_cmd.addArgs(&.{ "--env-file", ef });
     deploy_cmd.step.dependOn(&package_cmd.step);
 
     const deploy_step = b.step("awslambda_deploy", "Deploy the Lambda function");
