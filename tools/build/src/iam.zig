@@ -58,10 +58,6 @@ fn printHelp(writer: *std.Io.Writer) void {
 /// Get or create an IAM role for Lambda execution
 /// Returns the role ARN
 pub fn getOrCreateRole(role_name: []const u8, options: RunOptions) ![]const u8 {
-    var client = aws.Client.init(options.allocator, .{});
-    defer client.deinit();
-
-    // Try to get existing role
     const services = aws.Services(.{.iam}){};
 
     var diagnostics = aws.Diagnostics{
@@ -70,11 +66,9 @@ pub fn getOrCreateRole(role_name: []const u8, options: RunOptions) ![]const u8 {
         .allocator = options.allocator,
     };
 
-    const aws_options = aws.Options{
-        .client = client,
-        .diagnostics = &diagnostics,
-        .credential_options = .{ .profile = .{ .profile_name = options.profile } },
-    };
+    // Use the shared aws_options but add diagnostics for this call
+    var aws_options = options.aws_options;
+    aws_options.diagnostics = &diagnostics;
 
     const get_result = aws.Request(services.iam.get_role).call(.{
         .role_name = role_name,
@@ -82,7 +76,7 @@ pub fn getOrCreateRole(role_name: []const u8, options: RunOptions) ![]const u8 {
         defer diagnostics.deinit();
         if (diagnostics.http_code == 404) {
             // Role doesn't exist, create it
-            return try createRole(options.allocator, role_name, client, options.profile);
+            return try createRole(role_name, options);
         }
         std.log.err("IAM GetRole failed: {} (HTTP {})", .{ err, diagnostics.http_code });
         return error.IamGetRoleFailed;
@@ -93,13 +87,8 @@ pub fn getOrCreateRole(role_name: []const u8, options: RunOptions) ![]const u8 {
     return try options.allocator.dupe(u8, get_result.response.role.arn);
 }
 
-fn createRole(allocator: std.mem.Allocator, role_name: []const u8, client: aws.Client, profile: ?[]const u8) ![]const u8 {
+fn createRole(role_name: []const u8, options: RunOptions) ![]const u8 {
     const services = aws.Services(.{.iam}){};
-
-    const aws_options = aws.Options{
-        .client = client,
-        .credential_options = .{ .profile = .{ .profile_name = profile } },
-    };
 
     const assume_role_policy =
         \\{
@@ -122,10 +111,10 @@ fn createRole(allocator: std.mem.Allocator, role_name: []const u8, client: aws.C
     const create_result = try aws.Request(services.iam.create_role).call(.{
         .role_name = role_name,
         .assume_role_policy_document = assume_role_policy,
-    }, aws_options);
+    }, options.aws_options);
     defer create_result.deinit();
 
-    const arn = try allocator.dupe(u8, create_result.response.role.arn);
+    const arn = try options.allocator.dupe(u8, create_result.response.role.arn);
 
     // Attach the Lambda execution policy
     std.log.info("Attaching AWSLambdaExecute policy", .{});
@@ -133,7 +122,7 @@ fn createRole(allocator: std.mem.Allocator, role_name: []const u8, client: aws.C
     const attach_result = try aws.Request(services.iam.attach_role_policy).call(.{
         .policy_arn = "arn:aws:iam::aws:policy/AWSLambdaExecute",
         .role_name = role_name,
-    }, aws_options);
+    }, options.aws_options);
     defer attach_result.deinit();
 
     // IAM role creation can take a moment to propagate

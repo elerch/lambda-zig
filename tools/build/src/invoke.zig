@@ -57,19 +57,7 @@ fn printHelp(writer: *std.Io.Writer) void {
 }
 
 fn invokeFunction(function_name: []const u8, payload: []const u8, options: RunOptions) !void {
-    // Note: Profile is expected to be set via AWS_PROFILE env var before invoking this tool
-    // (e.g., via aws-vault exec)
-
-    var client = aws.Client.init(options.allocator, .{});
-    defer client.deinit();
-
     const services = aws.Services(.{.lambda}){};
-    const region = options.region orelse "us-east-1";
-
-    const aws_options = aws.Options{
-        .client = client,
-        .region = region,
-    };
 
     std.log.info("Invoking function: {s}", .{function_name});
 
@@ -78,7 +66,7 @@ fn invokeFunction(function_name: []const u8, payload: []const u8, options: RunOp
         .payload = payload,
         .log_type = "Tail",
         .invocation_type = "RequestResponse",
-    }, aws_options);
+    }, options.aws_options);
     defer result.deinit();
 
     // Print response payload

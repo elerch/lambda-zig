@@ -231,18 +231,7 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
     const base64_data = try std.fmt.allocPrint(options.allocator, "{b64}", .{zip_data});
     defer options.allocator.free(base64_data);
 
-    var client = aws.Client.init(options.allocator, .{});
-    defer client.deinit();
-
     const services = aws.Services(.{.lambda}){};
-
-    const region = options.region orelse "us-east-1";
-
-    const aws_options = aws.Options{
-        .client = client,
-        .region = region,
-        .credential_options = .{ .profile = .{ .profile_name = options.profile } },
-    };
 
     // Convert arch string to Lambda format
     const lambda_arch: []const u8 = if (std.mem.eql(u8, arch_str, "aarch64") or std.mem.eql(u8, arch_str, "arm64"))
@@ -273,12 +262,9 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
         .allocator = options.allocator,
     };
 
-    const create_options = aws.Options{
-        .client = client,
-        .region = region,
-        .diagnostics = &create_diagnostics,
-        .credential_options = .{ .profile = .{ .profile_name = options.profile } },
-    };
+    // Use the shared aws_options but add diagnostics for create call
+    var create_options = options.aws_options;
+    create_options.diagnostics = &create_diagnostics;
 
     const create_result = aws.Request(services.lambda.create_function).call(.{
         .function_name = deploy_opts.function_name,
@@ -301,7 +287,7 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
                 .function_name = deploy_opts.function_name,
                 .architectures = architectures,
                 .zip_file = base64_data,
-            }, aws_options);
+            }, options.aws_options);
             defer update_result.deinit();
 
             try options.stdout.print("Updated function: {s}\n", .{deploy_opts.function_name});
@@ -311,11 +297,11 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
             try options.stdout.flush();
 
             // Wait for function to be ready before updating configuration
-            try waitForFunctionReady(deploy_opts.function_name, aws_options);
+            try waitForFunctionReady(deploy_opts.function_name, options);
 
             // Update environment variables if provided
             if (env_variables) |vars| {
-                try updateFunctionConfiguration(deploy_opts.function_name, vars, aws_options, options);
+                try updateFunctionConfiguration(deploy_opts.function_name, vars, options);
             }
 
             return;
@@ -333,7 +319,7 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
     try options.stdout.flush();
 
     // Wait for function to be ready before returning
-    try waitForFunctionReady(deploy_opts.function_name, aws_options);
+    try waitForFunctionReady(deploy_opts.function_name, options);
 }
 
 /// Build environment variables in the format expected by AWS Lambda API
@@ -364,7 +350,6 @@ fn buildEnvVariables(
 fn updateFunctionConfiguration(
     function_name: []const u8,
     env_variables: []EnvVar,
-    aws_options: aws.Options,
     options: RunOptions,
 ) !void {
     const services = aws.Services(.{.lambda}){};
@@ -374,24 +359,24 @@ fn updateFunctionConfiguration(
     const update_config_result = try aws.Request(services.lambda.update_function_configuration).call(.{
         .function_name = function_name,
         .environment = .{ .variables = env_variables },
-    }, aws_options);
+    }, options.aws_options);
     defer update_config_result.deinit();
 
     try options.stdout.print("Updated environment variables\n", .{});
     try options.stdout.flush();
 
     // Wait for configuration update to complete
-    try waitForFunctionReady(function_name, aws_options);
+    try waitForFunctionReady(function_name, options);
 }
 
-fn waitForFunctionReady(function_name: []const u8, aws_options: aws.Options) !void {
+fn waitForFunctionReady(function_name: []const u8, options: RunOptions) !void {
     const services = aws.Services(.{.lambda}){};
 
     var retries: usize = 30; // Up to ~6 seconds total
     while (retries > 0) : (retries -= 1) {
         const result = aws.Request(services.lambda.get_function).call(.{
             .function_name = function_name,
-        }, aws_options) catch |err| {
+        }, options.aws_options) catch |err| {
             // Function should exist at this point, but retry on transient errors
             std.log.warn("GetFunction failed during wait: {}", .{err});
             std.Thread.sleep(200 * std.time.ns_per_ms);
