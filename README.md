@@ -19,6 +19,7 @@ Build options:
 * **profile**: AWS profile to use for credentials
 * **role-name**: IAM role name for the function (default: lambda_basic_execution)
 * **env-file**: Path to environment variables file for the Lambda function
+* **allow-principal**: AWS service principal to grant invoke permission (e.g., alexa-appkit.amazon.com)
 
 The Lambda function can be compiled for x86_64 or aarch64. The build system
 automatically configures the Lambda architecture based on the target.
@@ -72,6 +73,35 @@ API_KEY=secret123
 ```
 
 Lines starting with `#` are treated as comments. Empty lines are ignored.
+
+Service Permissions
+-------------------
+
+Lambda functions can be configured to allow invocation by AWS service principals.
+This is required for services like Alexa Skills Kit, API Gateway, or S3 to trigger
+your Lambda function.
+
+### Using the build system
+
+Pass the `-Dallow-principal` option to grant invoke permission to a service:
+
+```sh
+# Allow Alexa Skills Kit to invoke the function
+zig build awslambda_deploy -Dfunction-name=my-skill -Dallow-principal=alexa-appkit.amazon.com
+
+# Allow API Gateway to invoke the function
+zig build awslambda_deploy -Dfunction-name=my-api -Dallow-principal=apigateway.amazonaws.com
+```
+
+### Using the CLI directly
+
+```sh
+./lambda-build deploy --function-name my-fn --zip-file function.zip \
+    --allow-principal alexa-appkit.amazon.com
+```
+
+The permission is idempotent - if it already exists, the deployment will continue
+successfully.
 
 Using the Zig Package Manager
 -----------------------------

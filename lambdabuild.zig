@@ -39,6 +39,11 @@ pub fn configureBuild(
         "env-file",
         "Path to environment variables file (KEY=VALUE format)",
     ) orelse null;
+    const allow_principal = b.option(
+        []const u8,
+        "allow-principal",
+        "AWS service principal to grant invoke permission (e.g., alexa-appkit.amazon.com)",
+    ) orelse null;
 
     // Determine architecture for Lambda
     const target_arch = exe.root_module.resolved_target.?.result.cpu.arch;
@@ -94,6 +99,7 @@ pub fn configureBuild(
         arch_str,
     });
     if (env_file) |ef| deploy_cmd.addArgs(&.{ "--env-file", ef });
+    if (allow_principal) |ap| deploy_cmd.addArgs(&.{ "--allow-principal", ap });
     deploy_cmd.step.dependOn(&package_cmd.step);
 
     const deploy_step = b.step("awslambda_deploy", "Deploy the Lambda function");

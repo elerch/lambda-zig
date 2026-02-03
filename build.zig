@@ -134,6 +134,9 @@ fn configureBuildInternal(b: *std.Build, exe: *std.Build.Step.Compile) !void {
 /// - `-Dprofile=[string]`: AWS profile to use for credentials
 /// - `-Drole-name=[string]`: IAM role name (default: "lambda_basic_execution")
 /// - `-Dpayload=[string]`: JSON payload for invocation (default: "{}")
+/// - `-Denv-file=[string]`: Path to environment variables file (KEY=VALUE format)
+/// - `-Dallow-principal=[string]`: AWS service principal to grant invoke permission
+///   (e.g., "alexa-appkit.amazon.com" for Alexa Skills Kit)
 ///
 /// ## Example
 ///

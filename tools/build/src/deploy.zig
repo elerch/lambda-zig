@@ -17,6 +17,7 @@ pub fn run(args: []const []const u8, options: RunOptions) !void {
     var role_arn: ?[]const u8 = null;
     var role_name: []const u8 = "lambda_basic_execution";
     var arch: ?[]const u8 = null;
+    var allow_principal: ?[]const u8 = null;
 
     // Environment variables storage
     var env_vars = std.StringHashMap([]const u8).init(options.allocator);
@@ -60,6 +61,10 @@ pub fn run(args: []const []const u8, options: RunOptions) !void {
             i += 1;
             if (i >= args.len) return error.MissingEnvFile;
             try loadEnvFile(args[i], &env_vars, options.allocator);
+        } else if (std.mem.eql(u8, arg, "--allow-principal")) {
+            i += 1;
+            if (i >= args.len) return error.MissingAllowPrincipal;
+            allow_principal = args[i];
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printHelp(options.stdout);
             try options.stdout.flush();
@@ -92,6 +97,7 @@ pub fn run(args: []const []const u8, options: RunOptions) !void {
         .role_name = role_name,
         .arch = arch,
         .env_vars = if (env_vars.count() > 0) &env_vars else null,
+        .allow_principal = allow_principal,
     }, options);
 }
 
@@ -179,6 +185,8 @@ fn printHelp(writer: anytype) void {
         \\  --arch <arch>           Architecture: x86_64 or aarch64 (default: x86_64)
         \\  --env <KEY=VALUE>       Set environment variable (can be repeated)
         \\  --env-file <path>       Load environment variables from file (KEY=VALUE format)
+        \\  --allow-principal <p>   Grant invoke permission to AWS service principal
+        \\                          (e.g., alexa-appkit.amazon.com)
         \\  --help, -h              Show this help message
         \\
         \\Environment File Format:
@@ -203,6 +211,7 @@ const DeployOptions = struct {
     role_name: []const u8,
     arch: ?[]const u8,
     env_vars: ?*const std.StringHashMap([]const u8),
+    allow_principal: ?[]const u8,
 };
 
 fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
@@ -304,6 +313,11 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
                 try updateFunctionConfiguration(deploy_opts.function_name, vars, options);
             }
 
+            // Add invoke permission if requested
+            if (deploy_opts.allow_principal) |principal| {
+                try addPermission(deploy_opts.function_name, principal, options);
+            }
+
             return;
         }
 
@@ -320,6 +334,11 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
 
     // Wait for function to be ready before returning
     try waitForFunctionReady(deploy_opts.function_name, options);
+
+    // Add invoke permission if requested
+    if (deploy_opts.allow_principal) |principal| {
+        try addPermission(deploy_opts.function_name, principal, options);
+    }
 }
 
 /// Build environment variables in the format expected by AWS Lambda API
@@ -405,4 +424,66 @@ fn waitForFunctionReady(function_name: []const u8, options: RunOptions) !void {
     }
 
     return error.FunctionNotReady;
+}
+
+/// Add invoke permission for a service principal
+fn addPermission(
+    function_name: []const u8,
+    principal: []const u8,
+    options: RunOptions,
+) !void {
+    const services = aws.Services(.{.lambda}){};
+
+    // Generate statement ID from principal: "alexa-appkit.amazon.com" -> "allow-alexa-appkit-amazon-com"
+    var statement_id_buf: [128]u8 = undefined;
+    var statement_id_len: usize = 0;
+
+    // Add "allow-" prefix
+    const prefix = "allow-";
+    @memcpy(statement_id_buf[0..prefix.len], prefix);
+    statement_id_len = prefix.len;
+
+    // Sanitize principal: replace dots with dashes
+    for (principal) |c| {
+        if (statement_id_len >= statement_id_buf.len - 1) break;
+        statement_id_buf[statement_id_len] = if (c == '.') '-' else c;
+        statement_id_len += 1;
+    }
+
+    const statement_id = statement_id_buf[0..statement_id_len];
+
+    std.log.info("Adding invoke permission for principal: {s}", .{principal});
+
+    var diagnostics = aws.Diagnostics{
+        .http_code = undefined,
+        .response_body = undefined,
+        .allocator = options.allocator,
+    };
+
+    var add_perm_options = options.aws_options;
+    add_perm_options.diagnostics = &diagnostics;
+
+    const result = aws.Request(services.lambda.add_permission).call(.{
+        .function_name = function_name,
+        .statement_id = statement_id,
+        .action = "lambda:InvokeFunction",
+        .principal = principal,
+    }, add_perm_options) catch |err| {
+        defer diagnostics.deinit();
+
+        // 409 Conflict means permission already exists - that's fine
+        if (diagnostics.http_code == 409) {
+            std.log.info("Permission already exists for: {s}", .{principal});
+            try options.stdout.print("Permission already exists for: {s}\n", .{principal});
+            try options.stdout.flush();
+            return;
+        }
+
+        std.log.err("AddPermission failed: {} (HTTP {})", .{ err, diagnostics.http_code });
+        return error.AddPermissionFailed;
+    };
+    defer result.deinit();
+
+    try options.stdout.print("Added invoke permission for: {s}\n", .{principal});
+    try options.stdout.flush();
 }
