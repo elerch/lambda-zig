@@ -56,11 +56,20 @@ pub fn build(b: *std.Build) !void {
 
     const run_main_tests = b.addRunArtifact(main_tests);
 
+    // Build the lambda-build CLI to ensure it compiles
+    // This catches dependency version mismatches between tools/build and the main project
+    const lambda_build_dep = b.dependency("lambda_build", .{
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    const lambda_build_exe = lambda_build_dep.artifact("lambda-build");
+
     // This creates a build step. It will be visible in the `zig build --help` menu,
     // and can be selected like this: `zig build test`
     // This will evaluate the `test` step rather than the default, which is "install".
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&run_main_tests.step);
+    test_step.dependOn(&lambda_build_exe.step);
 
     // Create executable module
     const exe_module = b.createModule(.{
