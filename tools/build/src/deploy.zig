@@ -212,9 +212,6 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
         return error.InvalidArchitecture;
     }
 
-    // Note: Profile is expected to be set via AWS_PROFILE env var before invoking this tool
-    // (e.g., via aws-vault exec)
-
     // Get or create IAM role if not provided
     const role_arn = if (deploy_opts.role_arn) |r|
         try options.allocator.dupe(u8, r)
@@ -244,6 +241,7 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
     const aws_options = aws.Options{
         .client = client,
         .region = region,
+        .credential_options = .{ .profile = .{ .profile_name = options.profile } },
     };
 
     // Convert arch string to Lambda format
@@ -279,6 +277,7 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
         .client = client,
         .region = region,
         .diagnostics = &create_diagnostics,
+        .credential_options = .{ .profile = .{ .profile_name = options.profile } },
     };
 
     const create_result = aws.Request(services.lambda.create_function).call(.{

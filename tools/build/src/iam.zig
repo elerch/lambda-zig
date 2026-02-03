@@ -58,9 +58,6 @@ fn printHelp(writer: *std.Io.Writer) void {
 /// Get or create an IAM role for Lambda execution
 /// Returns the role ARN
 pub fn getOrCreateRole(role_name: []const u8, options: RunOptions) ![]const u8 {
-    // Note: Profile is expected to be set via AWS_PROFILE env var before invoking this tool
-    // (e.g., via aws-vault exec)
-
     var client = aws.Client.init(options.allocator, .{});
     defer client.deinit();
 
@@ -73,12 +70,10 @@ pub fn getOrCreateRole(role_name: []const u8, options: RunOptions) ![]const u8 {
         .allocator = options.allocator,
     };
 
-    const region = options.region orelse "us-east-1"; // IAM is global, but needs a region for signing
-    _ = region;
-
     const aws_options = aws.Options{
         .client = client,
         .diagnostics = &diagnostics,
+        .credential_options = .{ .profile = .{ .profile_name = options.profile } },
     };
 
     const get_result = aws.Request(services.iam.get_role).call(.{
@@ -87,7 +82,7 @@ pub fn getOrCreateRole(role_name: []const u8, options: RunOptions) ![]const u8 {
         defer diagnostics.deinit();
         if (diagnostics.http_code == 404) {
             // Role doesn't exist, create it
-            return try createRole(options.allocator, role_name, client);
+            return try createRole(options.allocator, role_name, client, options.profile);
         }
         std.log.err("IAM GetRole failed: {} (HTTP {})", .{ err, diagnostics.http_code });
         return error.IamGetRoleFailed;
@@ -98,11 +93,12 @@ pub fn getOrCreateRole(role_name: []const u8, options: RunOptions) ![]const u8 {
     return try options.allocator.dupe(u8, get_result.response.role.arn);
 }
 
-fn createRole(allocator: std.mem.Allocator, role_name: []const u8, client: aws.Client) ![]const u8 {
+fn createRole(allocator: std.mem.Allocator, role_name: []const u8, client: aws.Client, profile: ?[]const u8) ![]const u8 {
     const services = aws.Services(.{.iam}){};
 
     const aws_options = aws.Options{
         .client = client,
+        .credential_options = .{ .profile = .{ .profile_name = profile } },
     };
 
     const assume_role_policy =
