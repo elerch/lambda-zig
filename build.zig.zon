@@ -9,10 +9,6 @@
         .lambda_build = .{
             .path = "tools/build",
         },
-        .aws = .{
-            .url = "git+https://git.lerch.org/lobo/aws-sdk-for-zig#686b18d1f4329e80cf6d9b916eaa0c231333edb9",
-            .hash = "aws-0.0.1-SbsFcAc3CgCdWfayHWFazNfJBxkzLyU2wOJSj7h4W17-",
-        },
     },
     // Specifies the set of files and directories that are included in this package.
     // Only files and directories listed here are included in the `hash` that

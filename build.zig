@@ -107,8 +107,11 @@ fn configureBuildInternal(b: *std.Build, exe: *std.Build.Step.Compile) !void {
         .target = b.graph.host,
         .optimize = .ReleaseSafe,
     });
-    try @import("lambdabuild.zig").configureBuild(b, lambda_build_dep, exe);
+    try @import("lambdabuild.zig").configureBuild(b, lambda_build_dep, exe, .{});
 }
+
+/// Re-export LambdaConfig for consumers
+pub const LambdaConfig = @import("lambdabuild.zig").Config;
 
 /// Configure Lambda build steps for a Zig project.
 ///
@@ -127,12 +130,15 @@ fn configureBuildInternal(b: *std.Build, exe: *std.Build.Step.Compile) !void {
 ///
 /// ## Build Options
 ///
-/// The following options are added to the build:
+/// The following options are added to the build (command-line options override
+/// config defaults):
 ///
-/// - `-Dfunction-name=[string]`: Name of the Lambda function (default: "zig-fn")
+/// - `-Dfunction-name=[string]`: Name of the Lambda function
+///        (default: "zig-fn", or as provided by config parameter)
 /// - `-Dregion=[string]`: AWS region for deployment and invocation
 /// - `-Dprofile=[string]`: AWS profile to use for credentials
-/// - `-Drole-name=[string]`: IAM role name (default: "lambda_basic_execution")
+/// - `-Drole-name=[string]`: IAM role name
+///        (default: "lambda_basic_execution", or as provided by config parameter)
 /// - `-Dpayload=[string]`: JSON payload for invocation (default: "{}")
 /// - `-Denv-file=[string]`: Path to environment variables file (KEY=VALUE format)
 /// - `-Dallow-principal=[string]`: AWS service principal to grant invoke permission
@@ -155,14 +161,25 @@ fn configureBuildInternal(b: *std.Build, exe: *std.Build.Step.Compile) !void {
 ///     const exe = b.addExecutable(.{ ... });
 ///     b.installArtifact(exe);
 ///
-///     try lambda_zig.configureBuild(b, lambda_zig_dep, exe);
+///     // Use default config (function name defaults to "zig-fn")
+///     try lambda_zig.configureBuild(b, lambda_zig_dep, exe, .{});
+///
+///     // Or specify project-level defaults
+///     try lambda_zig.configureBuild(b, lambda_zig_dep, exe, .{
+///         .default_function_name = "my-function",
+///     });
 /// }
 /// ```
-pub fn configureBuild(b: *std.Build, lambda_zig_dep: *std.Build.Dependency, exe: *std.Build.Step.Compile) !void {
+pub fn configureBuild(
+    b: *std.Build,
+    lambda_zig_dep: *std.Build.Dependency,
+    exe: *std.Build.Step.Compile,
+    config: LambdaConfig,
+) !void {
     // Get lambda_build from the lambda_zig dependency's Build context
     const lambda_build_dep = lambda_zig_dep.builder.dependency("lambda_build", .{
         .target = b.graph.host,
         .optimize = .ReleaseSafe,
     });
-    try @import("lambdabuild.zig").configureBuild(b, lambda_build_dep, exe);
+    try @import("lambdabuild.zig").configureBuild(b, lambda_build_dep, exe, config);
 }

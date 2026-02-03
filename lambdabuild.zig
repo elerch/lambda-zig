@@ -5,6 +5,19 @@
 
 const std = @import("std");
 
+/// Configuration options for Lambda build integration.
+///
+/// These provide project-level defaults that can still be overridden
+/// via command-line options (e.g., `-Dfunction-name=...`).
+pub const Config = struct {
+    /// Default function name if not specified via -Dfunction-name.
+    /// This allows consuming projects to set their own default.
+    default_function_name: []const u8 = "zig-fn",
+
+    /// Default IAM role name if not specified via -Drole-name.
+    default_role_name: []const u8 = "lambda_basic_execution",
+};
+
 /// Configure Lambda build steps for a Zig project.
 ///
 /// Adds the following build steps:
@@ -12,23 +25,27 @@ const std = @import("std");
 /// - awslambda_iam: Create/verify IAM role
 /// - awslambda_deploy: Deploy the function to AWS
 /// - awslambda_run: Invoke the deployed function
+///
+/// The `config` parameter allows setting project-level defaults that can
+/// still be overridden via command-line options.
 pub fn configureBuild(
     b: *std.Build,
     lambda_build_dep: *std.Build.Dependency,
     exe: *std.Build.Step.Compile,
+    config: Config,
 ) !void {
     // Get the lambda-build CLI artifact from the dependency
     const cli = lambda_build_dep.artifact("lambda-build");
 
-    // Get configuration options
-    const function_name = b.option([]const u8, "function-name", "Function name for Lambda") orelse "zig-fn";
+    // Get configuration options (command-line overrides config defaults)
+    const function_name = b.option([]const u8, "function-name", "Function name for Lambda") orelse config.default_function_name;
     const region = b.option([]const u8, "region", "AWS region") orelse null;
     const profile = b.option([]const u8, "profile", "AWS profile") orelse null;
     const role_name = b.option(
         []const u8,
         "role-name",
         "IAM role name (default: lambda_basic_execution)",
-    ) orelse "lambda_basic_execution";
+    ) orelse config.default_role_name;
     const payload = b.option(
         []const u8,
         "payload",
