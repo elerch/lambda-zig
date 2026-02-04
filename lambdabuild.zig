@@ -135,7 +135,10 @@ pub fn configureBuild(
     iam_step.dependOn(&iam_cmd.step);
 
     // Deploy step (depends on package)
+    // NOTE: has_side_effects = true ensures this always runs, since AWS state
+    // can change externally (e.g., function deleted via console)
     const deploy_cmd = b.addRunArtifact(cli);
+    deploy_cmd.has_side_effects = true;
     deploy_cmd.step.name = try std.fmt.allocPrint(b.allocator, "{s} deploy", .{cli.name});
     if (profile) |p| deploy_cmd.addArgs(&.{ "--profile", p });
     if (region) |r| deploy_cmd.addArgs(&.{ "--region", r });
