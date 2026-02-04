@@ -20,6 +20,10 @@ pub const Config = struct {
     /// Default environment file if not specified via -Denv-file.
     /// If the file doesn't exist, it's silently skipped.
     default_env_file: ?[]const u8 = ".env",
+
+    /// Default AWS service principal to grant invoke permission.
+    /// For Alexa skills, use "alexa-appkit.amazon.com".
+    default_allow_principal: ?[]const u8 = null,
 };
 
 /// Information about the configured Lambda build steps.
@@ -93,7 +97,7 @@ pub fn configureBuild(
         []const u8,
         "allow-principal",
         "AWS service principal to grant invoke permission (e.g., alexa-appkit.amazon.com)",
-    ) orelse null;
+    ) orelse config.default_allow_principal;
 
     // Determine architecture for Lambda
     const target_arch = exe.root_module.resolved_target.?.result.cpu.arch;
