@@ -38,7 +38,7 @@ pub fn main() !u8 {
 
     run(allocator, &stdout_writer.interface, &stderr_writer.interface) catch |err| {
         stderr_writer.interface.print("Error: {}\n", .{err}) catch {};
-        stderr_writer.interface.flush() catch {};
+        try stderr_writer.interface.flush();
         return 1;
     };
     try stderr_writer.interface.flush();

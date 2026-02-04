@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 pub const HandlerFn = *const fn (std.mem.Allocator, []const u8) anyerror![]const u8;
 
@@ -64,11 +63,11 @@ pub fn run(allocator: ?std.mem.Allocator, event_handler: HandlerFn) !void { // T
         const event = ev.?;
         defer ev.?.deinit();
         const event_response = event_handler(req_allocator, event.event_data) catch |err| {
-            event.reportError(@errorReturnTrace(), err, lambda_runtime_uri) catch unreachable;
+            event.reportError(@errorReturnTrace(), err, lambda_runtime_uri) catch @panic("Error reporting error");
             continue;
         };
         event.postResponse(lambda_runtime_uri, event_response) catch |err| {
-            event.reportError(@errorReturnTrace(), err, lambda_runtime_uri) catch unreachable;
+            event.reportError(@errorReturnTrace(), err, lambda_runtime_uri) catch @panic("Error reporting error");
             continue;
         };
     }

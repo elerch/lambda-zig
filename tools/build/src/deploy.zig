@@ -148,6 +148,7 @@ fn loadEnvFile(
     defer file.close();
 
     // Read entire file (env files are typically small)
+    // SAFETY: set on read
     var read_buffer: [4096]u8 = undefined;
     var file_reader = file.reader(&read_buffer);
     const content = file_reader.interface.allocRemaining(allocator, std.Io.Limit.limited(64 * 1024)) catch |err| {
@@ -244,6 +245,7 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
     // Read the zip file and encode as base64
     const zip_file = try std.fs.cwd().openFile(deploy_opts.zip_file, .{});
     defer zip_file.close();
+    // SAFETY: set on read
     var read_buffer: [4096]u8 = undefined;
     var file_reader = zip_file.reader(&read_buffer);
     const zip_data = try file_reader.interface.allocRemaining(options.allocator, std.Io.Limit.limited(50 * 1024 * 1024));
@@ -278,7 +280,9 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
     std.log.info("Attempting to create function: {s}", .{deploy_opts.function_name});
 
     var create_diagnostics = aws.Diagnostics{
+        // SAFETY: set by sdk on error
         .response_status = undefined,
+        // SAFETY: set by sdk on error
         .response_body = undefined,
         .allocator = options.allocator,
     };
@@ -464,6 +468,7 @@ fn addPermission(
     const services = aws.Services(.{.lambda}){};
 
     // Generate statement ID from principal: "alexa-appkit.amazon.com" -> "allow-alexa-appkit-amazon-com"
+    // SAFETY: set on write
     var statement_id_buf: [128]u8 = undefined;
     var statement_id_len: usize = 0;
 
@@ -484,7 +489,9 @@ fn addPermission(
     std.log.info("Adding invoke permission for principal: {s}", .{principal});
 
     var diagnostics = aws.Diagnostics{
+        // SAFETY: set by sdk on error
         .response_status = undefined,
+        // SAFETY: set by sdk on error
         .response_body = undefined,
         .allocator = options.allocator,
     };
@@ -542,6 +549,7 @@ fn writeDeployOutput(
     const file = try std.fs.cwd().createFile(output_path, .{});
     defer file.close();
 
+    // SAFETY: set on write
     var write_buffer: [4096]u8 = undefined;
     var buffered = file.writer(&write_buffer);
     const writer = &buffered.interface;

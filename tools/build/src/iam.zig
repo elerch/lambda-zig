@@ -61,7 +61,9 @@ pub fn getOrCreateRole(role_name: []const u8, options: RunOptions) ![]const u8 {
     const services = aws.Services(.{.iam}){};
 
     var diagnostics = aws.Diagnostics{
+        // SAFETY: set by sdk on error
         .response_status = undefined,
+        // SAFETY: set by sdk on error
         .response_body = undefined,
         .allocator = options.allocator,
     };
