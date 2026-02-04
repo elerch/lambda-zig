@@ -16,6 +16,10 @@ pub const Config = struct {
 
     /// Default IAM role name if not specified via -Drole-name.
     default_role_name: []const u8 = "lambda_basic_execution",
+
+    /// Default environment file if not specified via -Denv-file.
+    /// If the file doesn't exist, it's silently skipped.
+    default_env_file: ?[]const u8 = ".env",
 };
 
 /// Information about the configured Lambda build steps.
@@ -84,7 +88,7 @@ pub fn configureBuild(
         []const u8,
         "env-file",
         "Path to environment variables file (KEY=VALUE format)",
-    ) orelse null;
+    ) orelse config.default_env_file;
     const allow_principal = b.option(
         []const u8,
         "allow-principal",

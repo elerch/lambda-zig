@@ -138,8 +138,12 @@ fn loadEnvFile(
     allocator: std.mem.Allocator,
 ) !void {
     const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        if (err == error.FileNotFound) {
+            std.log.info("Env file '{s}' not found, skipping", .{path});
+            return;
+        }
         std.log.err("Failed to open env file '{s}': {}", .{ path, err });
-        return error.EnvFileNotFound;
+        return error.EnvFileOpenError;
     };
     defer file.close();
 
