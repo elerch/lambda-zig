@@ -11,8 +11,8 @@ const std = @import("std");
 /// via command-line options (e.g., `-Dfunction-name=...`).
 pub const Config = struct {
     /// Default function name if not specified via -Dfunction-name.
-    /// This allows consuming projects to set their own default.
-    default_function_name: []const u8 = "zig-fn",
+    /// If null, falls back to the executable name (exe.name).
+    default_function_name: ?[]const u8 = null,
 
     /// Default IAM role name if not specified via -Drole-name.
     default_role_name: []const u8 = "lambda_basic_execution",
@@ -75,7 +75,7 @@ pub fn configureBuild(
     const cli = lambda_build_dep.artifact("lambda-build");
 
     // Get configuration options (command-line overrides config defaults)
-    const function_name = b.option([]const u8, "function-name", "Function name for Lambda") orelse config.default_function_name;
+    const function_name = b.option([]const u8, "function-name", "Function name for Lambda") orelse config.default_function_name orelse exe.name;
     const region = b.option([]const u8, "region", "AWS region") orelse null;
     const profile = b.option([]const u8, "profile", "AWS profile") orelse null;
     const role_name = b.option(
