@@ -211,7 +211,10 @@ const Event = struct {
         var redirect_buffer: [1024]u8 = undefined;
         const response = try req.receiveHead(&redirect_buffer);
 
-        if (response.head.status != .ok) return error.UnexpectedStatusFromPostResponse;
+        // Lambda Runtime API returns 202 Accepted for successful response posts
+        if (response.head.status != .ok and response.head.status != .accepted) {
+            return error.UnexpectedStatusFromPostResponse;
+        }
     }
 };
 
