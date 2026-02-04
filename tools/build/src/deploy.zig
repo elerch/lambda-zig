@@ -278,7 +278,7 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
     std.log.info("Attempting to create function: {s}", .{deploy_opts.function_name});
 
     var create_diagnostics = aws.Diagnostics{
-        .http_code = undefined,
+        .response_status = undefined,
         .response_body = undefined,
         .allocator = options.allocator,
     };
@@ -302,10 +302,9 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
         .environment = if (env_variables) |vars| .{ .variables = vars } else null,
     }, create_options) catch |err| {
         defer create_diagnostics.deinit();
-        std.log.info("CreateFunction returned: error={}, HTTP code={}", .{ err, create_diagnostics.http_code });
 
         // Function already exists (409 Conflict) - update it instead
-        if (create_diagnostics.http_code == 409) {
+        if (create_diagnostics.response_status == .conflict) {
             std.log.info("Function already exists, updating: {s}", .{deploy_opts.function_name});
 
             const update_result = try aws.Request(services.lambda.update_function_code).call(.{
@@ -342,8 +341,10 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
 
             return;
         }
-
-        std.log.err("Lambda CreateFunction failed: {} (HTTP {})", .{ err, create_diagnostics.http_code });
+        std.log.err(
+            "Lambda CreateFunction failed: {} (HTTP Response code {})",
+            .{ err, create_diagnostics.response_status },
+        );
         return error.LambdaCreateFunctionFailed;
     };
     defer create_result.deinit();
@@ -483,7 +484,7 @@ fn addPermission(
     std.log.info("Adding invoke permission for principal: {s}", .{principal});
 
     var diagnostics = aws.Diagnostics{
-        .http_code = undefined,
+        .response_status = undefined,
         .response_body = undefined,
         .allocator = options.allocator,
     };
@@ -500,14 +501,17 @@ fn addPermission(
         defer diagnostics.deinit();
 
         // 409 Conflict means permission already exists - that's fine
-        if (diagnostics.http_code == 409) {
+        if (diagnostics.response_status == .conflict) {
             std.log.info("Permission already exists for: {s}", .{principal});
             try options.stdout.print("Permission already exists for: {s}\n", .{principal});
             try options.stdout.flush();
             return;
         }
 
-        std.log.err("AddPermission failed: {} (HTTP {})", .{ err, diagnostics.http_code });
+        std.log.err(
+            "AddPermission failed: {} (HTTP Response code {})",
+            .{ err, diagnostics.response_status },
+        );
         return error.AddPermissionFailed;
     };
     defer result.deinit();

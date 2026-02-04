@@ -61,7 +61,7 @@ pub fn getOrCreateRole(role_name: []const u8, options: RunOptions) ![]const u8 {
     const services = aws.Services(.{.iam}){};
 
     var diagnostics = aws.Diagnostics{
-        .http_code = undefined,
+        .response_status = undefined,
         .response_body = undefined,
         .allocator = options.allocator,
     };
@@ -74,11 +74,14 @@ pub fn getOrCreateRole(role_name: []const u8, options: RunOptions) ![]const u8 {
         .role_name = role_name,
     }, aws_options) catch |err| {
         defer diagnostics.deinit();
-        if (diagnostics.http_code == 404) {
+        if (diagnostics.response_status == .not_found) {
             // Role doesn't exist, create it
             return try createRole(role_name, options);
         }
-        std.log.err("IAM GetRole failed: {} (HTTP {})", .{ err, diagnostics.http_code });
+        std.log.err(
+            "IAM GetRole failed: {} (HTTP Response code {})",
+            .{ err, diagnostics.response_status },
+        );
         return error.IamGetRoleFailed;
     };
     defer get_result.deinit();
