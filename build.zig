@@ -107,17 +107,24 @@ fn configureBuildInternal(b: *std.Build, exe: *std.Build.Step.Compile) !void {
         .target = b.graph.host,
         .optimize = .ReleaseSafe,
     });
-    try @import("lambdabuild.zig").configureBuild(b, lambda_build_dep, exe, .{});
+    // Ignore return value for internal builds
+    _ = try @import("lambdabuild.zig").configureBuild(b, lambda_build_dep, exe, .{});
 }
 
-/// Re-export LambdaConfig for consumers
+/// Re-export types for consumers
 pub const LambdaConfig = @import("lambdabuild.zig").Config;
+pub const LambdaBuildInfo = @import("lambdabuild.zig").BuildInfo;
 
 /// Configure Lambda build steps for a Zig project.
 ///
 /// This function adds build steps and options for packaging and deploying
 /// Lambda functions to AWS. The `lambda_zig_dep` parameter must be the
 /// dependency object obtained from `b.dependency("lambda_zig", ...)`.
+///
+/// Returns a `LambdaBuildInfo` struct containing:
+/// - References to all build steps (package, iam, deploy, invoke)
+/// - A `deploy_output` LazyPath to a JSON file with deployment info
+/// - The function name used
 ///
 /// ## Build Steps
 ///
@@ -144,6 +151,24 @@ pub const LambdaConfig = @import("lambdabuild.zig").Config;
 /// - `-Dallow-principal=[string]`: AWS service principal to grant invoke permission
 ///   (e.g., "alexa-appkit.amazon.com" for Alexa Skills Kit)
 ///
+/// ## Deploy Output
+///
+/// The `deploy_output` field in the returned struct is a LazyPath to a JSON file
+/// containing deployment information (available after deploy completes):
+///
+/// ```json
+/// {
+///   "arn": "arn:aws:lambda:us-east-1:123456789012:function:my-function",
+///   "function_name": "my-function",
+///   "partition": "aws",
+///   "region": "us-east-1",
+///   "account_id": "123456789012",
+///   "role_arn": "arn:aws:iam::123456789012:role/lambda_basic_execution",
+///   "architecture": "arm64",
+///   "environment_keys": ["MY_VAR"]
+/// }
+/// ```
+///
 /// ## Example
 ///
 /// ```zig
@@ -161,13 +186,15 @@ pub const LambdaConfig = @import("lambdabuild.zig").Config;
 ///     const exe = b.addExecutable(.{ ... });
 ///     b.installArtifact(exe);
 ///
-///     // Use default config (function name defaults to "zig-fn")
-///     try lambda_zig.configureBuild(b, lambda_zig_dep, exe, .{});
-///
-///     // Or specify project-level defaults
-///     try lambda_zig.configureBuild(b, lambda_zig_dep, exe, .{
+///     // Configure Lambda build and get deployment info
+///     const lambda = try lambda_zig.configureBuild(b, lambda_zig_dep, exe, .{
 ///         .default_function_name = "my-function",
 ///     });
+///
+///     // Use lambda.deploy_output in other steps that need the ARN
+///     const my_step = b.addRunArtifact(my_tool);
+///     my_step.addFileArg(lambda.deploy_output);
+///     my_step.step.dependOn(lambda.deploy_step);  // Ensure deploy runs first
 /// }
 /// ```
 pub fn configureBuild(
@@ -175,11 +202,11 @@ pub fn configureBuild(
     lambda_zig_dep: *std.Build.Dependency,
     exe: *std.Build.Step.Compile,
     config: LambdaConfig,
-) !void {
+) !LambdaBuildInfo {
     // Get lambda_build from the lambda_zig dependency's Build context
     const lambda_build_dep = lambda_zig_dep.builder.dependency("lambda_build", .{
         .target = b.graph.host,
         .optimize = .ReleaseSafe,
     });
-    try @import("lambdabuild.zig").configureBuild(b, lambda_build_dep, exe, config);
+    return @import("lambdabuild.zig").configureBuild(b, lambda_build_dep, exe, config);
 }

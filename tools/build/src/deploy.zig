@@ -18,6 +18,7 @@ pub fn run(args: []const []const u8, options: RunOptions) !void {
     var role_name: []const u8 = "lambda_basic_execution";
     var arch: ?[]const u8 = null;
     var allow_principal: ?[]const u8 = null;
+    var deploy_output: ?[]const u8 = null;
 
     // Environment variables storage
     var env_vars = std.StringHashMap([]const u8).init(options.allocator);
@@ -65,6 +66,10 @@ pub fn run(args: []const []const u8, options: RunOptions) !void {
             i += 1;
             if (i >= args.len) return error.MissingAllowPrincipal;
             allow_principal = args[i];
+        } else if (std.mem.eql(u8, arg, "--deploy-output")) {
+            i += 1;
+            if (i >= args.len) return error.MissingDeployOutput;
+            deploy_output = args[i];
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printHelp(options.stdout);
             try options.stdout.flush();
@@ -98,6 +103,7 @@ pub fn run(args: []const []const u8, options: RunOptions) !void {
         .arch = arch,
         .env_vars = if (env_vars.count() > 0) &env_vars else null,
         .allow_principal = allow_principal,
+        .deploy_output = deploy_output,
     }, options);
 }
 
@@ -187,6 +193,7 @@ fn printHelp(writer: anytype) void {
         \\  --env-file <path>       Load environment variables from file (KEY=VALUE format)
         \\  --allow-principal <p>   Grant invoke permission to AWS service principal
         \\                          (e.g., alexa-appkit.amazon.com)
+        \\  --deploy-output <path>  Write deployment info (ARN, region, etc.) to JSON file
         \\  --help, -h              Show this help message
         \\
         \\Environment File Format:
@@ -212,6 +219,7 @@ const DeployOptions = struct {
     arch: ?[]const u8,
     env_vars: ?*const std.StringHashMap([]const u8),
     allow_principal: ?[]const u8,
+    deploy_output: ?[]const u8,
 };
 
 fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
@@ -275,6 +283,10 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
     var create_options = options.aws_options;
     create_options.diagnostics = &create_diagnostics;
 
+    // Track the function ARN from whichever path succeeds
+    var function_arn: ?[]const u8 = null;
+    defer if (function_arn) |arn| options.allocator.free(arn);
+
     const create_result = aws.Request(services.lambda.create_function).call(.{
         .function_name = deploy_opts.function_name,
         .architectures = architectures,
@@ -302,6 +314,7 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
             try options.stdout.print("Updated function: {s}\n", .{deploy_opts.function_name});
             if (update_result.response.function_arn) |arn| {
                 try options.stdout.print("ARN: {s}\n", .{arn});
+                function_arn = try options.allocator.dupe(u8, arn);
             }
             try options.stdout.flush();
 
@@ -318,6 +331,11 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
                 try addPermission(deploy_opts.function_name, principal, options);
             }
 
+            // Write deploy output if requested
+            if (deploy_opts.deploy_output) |output_path| {
+                try writeDeployOutput(output_path, function_arn.?, role_arn, lambda_arch, deploy_opts.env_vars);
+            }
+
             return;
         }
 
@@ -329,6 +347,7 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
     try options.stdout.print("Created function: {s}\n", .{deploy_opts.function_name});
     if (create_result.response.function_arn) |arn| {
         try options.stdout.print("ARN: {s}\n", .{arn});
+        function_arn = try options.allocator.dupe(u8, arn);
     }
     try options.stdout.flush();
 
@@ -338,6 +357,11 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
     // Add invoke permission if requested
     if (deploy_opts.allow_principal) |principal| {
         try addPermission(deploy_opts.function_name, principal, options);
+    }
+
+    // Write deploy output if requested
+    if (deploy_opts.deploy_output) |output_path| {
+        try writeDeployOutput(output_path, function_arn.?, role_arn, lambda_arch, deploy_opts.env_vars);
     }
 }
 
@@ -486,4 +510,66 @@ fn addPermission(
 
     try options.stdout.print("Added invoke permission for: {s}\n", .{principal});
     try options.stdout.flush();
+}
+
+/// Write deployment information to a JSON file
+fn writeDeployOutput(
+    output_path: []const u8,
+    function_arn: []const u8,
+    role_arn: []const u8,
+    architecture: []const u8,
+    env_vars: ?*const std.StringHashMap([]const u8),
+) !void {
+    // Parse ARN to extract components
+    // ARN format: arn:{partition}:lambda:{region}:{account_id}:function:{name}
+    var arn_parts = std.mem.splitScalar(u8, function_arn, ':');
+    _ = arn_parts.next(); // arn
+    const partition = arn_parts.next() orelse return error.InvalidArn;
+    _ = arn_parts.next(); // lambda
+    const region = arn_parts.next() orelse return error.InvalidArn;
+    const account_id = arn_parts.next() orelse return error.InvalidArn;
+    _ = arn_parts.next(); // function
+    const function_name = arn_parts.next() orelse return error.InvalidArn;
+
+    const file = try std.fs.cwd().createFile(output_path, .{});
+    defer file.close();
+
+    var write_buffer: [4096]u8 = undefined;
+    var buffered = file.writer(&write_buffer);
+    const writer = &buffered.interface;
+
+    try writer.print(
+        \\{{
+        \\  "arn": "{s}",
+        \\  "function_name": "{s}",
+        \\  "partition": "{s}",
+        \\  "region": "{s}",
+        \\  "account_id": "{s}",
+        \\  "role_arn": "{s}",
+        \\  "architecture": "{s}",
+        \\  "environment_keys": [
+    , .{ function_arn, function_name, partition, region, account_id, role_arn, architecture });
+
+    // Write environment variable keys
+    if (env_vars) |vars| {
+        var it = vars.keyIterator();
+        var first = true;
+        while (it.next()) |key| {
+            if (!first) {
+                try writer.writeAll(",");
+            }
+            try writer.print("\n    \"{s}\"", .{key.*});
+            first = false;
+        }
+    }
+
+    try writer.writeAll(
+        \\
+        \\  ]
+        \\}
+        \\
+    );
+    try writer.flush();
+
+    std.log.info("Wrote deployment info to: {s}", .{output_path});
 }

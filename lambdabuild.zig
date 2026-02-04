@@ -18,6 +18,32 @@ pub const Config = struct {
     default_role_name: []const u8 = "lambda_basic_execution",
 };
 
+/// Information about the configured Lambda build steps.
+///
+/// Returned by `configureBuild` to allow consumers to depend on steps
+/// and access deployment outputs.
+pub const BuildInfo = struct {
+    /// Package step - creates the deployment zip
+    package_step: *std.Build.Step,
+
+    /// IAM step - creates/verifies the IAM role
+    iam_step: *std.Build.Step,
+
+    /// Deploy step - deploys the function to AWS Lambda
+    deploy_step: *std.Build.Step,
+
+    /// Invoke step - invokes the deployed function
+    invoke_step: *std.Build.Step,
+
+    /// LazyPath to JSON file with deployment info.
+    /// Contains: arn, function_name, region, account_id, role_arn, architecture, environment_keys
+    /// Available after deploy_step completes.
+    deploy_output: std.Build.LazyPath,
+
+    /// The function name used for deployment
+    function_name: []const u8,
+};
+
 /// Configure Lambda build steps for a Zig project.
 ///
 /// Adds the following build steps:
@@ -28,12 +54,15 @@ pub const Config = struct {
 ///
 /// The `config` parameter allows setting project-level defaults that can
 /// still be overridden via command-line options.
+///
+/// Returns a `BuildInfo` struct containing references to all steps and
+/// a `deploy_output` LazyPath to the deployment info JSON file.
 pub fn configureBuild(
     b: *std.Build,
     lambda_build_dep: *std.Build.Dependency,
     exe: *std.Build.Step.Compile,
     config: Config,
-) !void {
+) !BuildInfo {
     // Get the lambda-build CLI artifact from the dependency
     const cli = lambda_build_dep.artifact("lambda-build");
 
@@ -117,6 +146,9 @@ pub fn configureBuild(
     });
     if (env_file) |ef| deploy_cmd.addArgs(&.{ "--env-file", ef });
     if (allow_principal) |ap| deploy_cmd.addArgs(&.{ "--allow-principal", ap });
+    // Add deploy output file for deployment info JSON
+    deploy_cmd.addArg("--deploy-output");
+    const deploy_output = deploy_cmd.addOutputFileArg("deploy-output.json");
     deploy_cmd.step.dependOn(&package_cmd.step);
 
     const deploy_step = b.step("awslambda_deploy", "Deploy the Lambda function");
@@ -138,4 +170,13 @@ pub fn configureBuild(
 
     const run_step = b.step("awslambda_run", "Invoke the deployed Lambda function");
     run_step.dependOn(&invoke_cmd.step);
+
+    return .{
+        .package_step = package_step,
+        .iam_step = iam_step,
+        .deploy_step = deploy_step,
+        .invoke_step = run_step,
+        .deploy_output = deploy_output,
+        .function_name = function_name,
+    };
 }
