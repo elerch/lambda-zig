@@ -3,17 +3,25 @@
 const std = @import("std");
 const aws = @import("aws");
 const RunOptions = @import("main.zig").RunOptions;
+const LambdaBuildConfig = @import("LambdaBuildConfig.zig");
 
 pub fn run(args: []const []const u8, options: RunOptions) !void {
-    var role_name: ?[]const u8 = null;
+    var config_file: ?[]const u8 = null;
+    var is_config_required = false;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--role-name")) {
+        if (std.mem.eql(u8, arg, "--config-file")) {
             i += 1;
-            if (i >= args.len) return error.MissingRoleName;
-            role_name = args[i];
+            if (i >= args.len) return error.MissingConfigFile;
+            config_file = args[i];
+            is_config_required = true;
+        } else if (std.mem.eql(u8, arg, "--config-file-optional")) {
+            i += 1;
+            if (i >= args.len) return error.MissingConfigFile;
+            config_file = args[i];
+            is_config_required = false;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printHelp(options.stdout);
             try options.stdout.flush();
@@ -25,30 +33,44 @@ pub fn run(args: []const []const u8, options: RunOptions) !void {
         }
     }
 
-    if (role_name == null) {
-        try options.stderr.print("Error: --role-name is required\n", .{});
-        printHelp(options.stderr);
-        try options.stderr.flush();
-        return error.MissingRoleName;
-    }
+    // Load config file if provided
+    var parsed_config = if (config_file) |path|
+        try LambdaBuildConfig.loadFromFile(options.allocator, path, !is_config_required)
+    else
+        null;
+    defer if (parsed_config) |*pc| pc.deinit();
 
-    const arn = try getOrCreateRole(role_name.?, options);
+    // Get role_name from config or use default
+    const role_name = if (parsed_config) |pc|
+        pc.parsed.value.role_name
+    else
+        "lambda_basic_execution";
+
+    const arn = try getOrCreateRole(role_name, options);
     defer options.allocator.free(arn);
 
     try options.stdout.print("{s}\n", .{arn});
     try options.stdout.flush();
 }
 
-fn printHelp(writer: *std.Io.Writer) void {
+fn printHelp(writer: anytype) void {
     writer.print(
         \\Usage: lambda-build iam [options]
         \\
         \\Create or retrieve an IAM role for Lambda execution.
         \\
         \\Options:
-        \\  --role-name <name>  Name of the IAM role (required)
-        \\  --help, -h          Show this help message
+        \\  --config-file <path>           Path to JSON config file (required, error if missing)
+        \\  --config-file-optional <path>  Path to JSON config file (optional, use defaults if missing)
+        \\  --help, -h                     Show this help message
         \\
+        \\Config File:
+        \\  The config file can specify the IAM role name:
+        \\  {{
+        \\    "role_name": "my_lambda_role"
+        \\  }}
+        \\
+        \\If no config file is provided, uses "lambda_basic_execution" as the role name.
         \\If the role exists, its ARN is returned. If not, a new role is created
         \\with the AWSLambdaExecute policy attached.
         \\
@@ -71,19 +93,20 @@ pub fn getOrCreateRole(role_name: []const u8, options: RunOptions) ![]const u8 {
     // Use the shared aws_options but add diagnostics for this call
     var aws_options = options.aws_options;
     aws_options.diagnostics = &diagnostics;
+    defer aws_options.diagnostics = null;
 
     const get_result = aws.Request(services.iam.get_role).call(.{
         .role_name = role_name,
     }, aws_options) catch |err| {
         defer diagnostics.deinit();
-        if (diagnostics.response_status == .not_found) {
+
+        // Check for "not found" via HTTP status or error response body
+        if (diagnostics.response_status == .not_found or
+            std.mem.indexOf(u8, diagnostics.response_body, "NoSuchEntity") != null)
             // Role doesn't exist, create it
             return try createRole(role_name, options);
-        }
-        std.log.err(
-            "IAM GetRole failed: {} (HTTP Response code {})",
-            .{ err, diagnostics.response_status },
-        );
+
+        std.log.err("IAM GetRole failed: {} (HTTP {})", .{ err, diagnostics.response_status });
         return error.IamGetRoleFailed;
     };
     defer get_result.deinit();

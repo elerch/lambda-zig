@@ -110,9 +110,23 @@ fn configureBuildInternal(b: *std.Build, exe: *std.Build.Step.Compile) !void {
     _ = try @import("lambdabuild.zig").configureBuild(b, lambda_build_dep, exe, .{});
 }
 
-/// Re-export types for consumers
-pub const LambdaConfig = @import("lambdabuild.zig").Config;
-pub const LambdaBuildInfo = @import("lambdabuild.zig").BuildInfo;
+// Re-export types for consumers
+const lambdabuild = @import("lambdabuild.zig");
+
+/// Options for Lambda build integration.
+pub const Options = lambdabuild.Options;
+
+/// Source for Lambda build configuration (none, file, or inline config).
+pub const LambdaConfigSource = lambdabuild.LambdaConfigSource;
+
+/// A config file path with explicit required/optional semantics.
+pub const ConfigFile = lambdabuild.ConfigFile;
+
+/// Lambda build configuration struct (role_name, timeout, memory_size, VPC, etc.).
+pub const LambdaBuildConfig = lambdabuild.LambdaBuildConfig;
+
+/// Information about the configured Lambda build steps.
+pub const BuildInfo = lambdabuild.BuildInfo;
 
 /// Configure Lambda build steps for a Zig project.
 ///
@@ -136,19 +150,42 @@ pub const LambdaBuildInfo = @import("lambdabuild.zig").BuildInfo;
 ///
 /// ## Build Options
 ///
-/// The following options are added to the build (command-line options override
-/// config defaults):
+/// The following command-line options are available:
 ///
 /// - `-Dfunction-name=[string]`: Name of the Lambda function
-///        (default: "zig-fn", or as provided by config parameter)
+///        (default: exe.name, or as provided by config parameter)
 /// - `-Dregion=[string]`: AWS region for deployment and invocation
 /// - `-Dprofile=[string]`: AWS profile to use for credentials
-/// - `-Drole-name=[string]`: IAM role name
-///        (default: "lambda_basic_execution", or as provided by config parameter)
 /// - `-Dpayload=[string]`: JSON payload for invocation (default: "{}")
 /// - `-Denv-file=[string]`: Path to environment variables file (KEY=VALUE format)
-/// - `-Dallow-principal=[string]`: AWS service principal to grant invoke permission
-///   (e.g., "alexa-appkit.amazon.com" for Alexa Skills Kit)
+/// - `-Dconfig-file=[string]`: Path to Lambda build config JSON file (overrides function_config)
+///
+/// ## Configuration File
+///
+/// Function settings (timeout, memory, VPC, etc.) and deployment settings
+/// (role_name, allow_principal) are configured via a JSON file or inline config.
+///
+/// By default, looks for `lambda.json` in the project root. If not found,
+/// uses sensible defaults (role_name = "lambda_basic_execution").
+///
+/// ### Example lambda.json
+///
+/// ```json
+/// {
+///   "role_name": "my_lambda_role",
+///   "timeout": 30,
+///   "memory_size": 512,
+///   "description": "My function description",
+///   "allow_principal": "alexa-appkit.amazon.com",
+///   "tags": [
+///     { "key": "Environment", "value": "production" }
+///   ],
+///   "logging_config": {
+///     "log_format": "JSON",
+///     "application_log_level": "INFO"
+///   }
+/// }
+/// ```
 ///
 /// ## Deploy Output
 ///
@@ -170,6 +207,8 @@ pub const LambdaBuildInfo = @import("lambdabuild.zig").BuildInfo;
 ///
 /// ## Example
 ///
+/// ### Basic Usage (uses lambda.json if present)
+///
 /// ```zig
 /// const lambda_zig = @import("lambda_zig");
 ///
@@ -185,27 +224,73 @@ pub const LambdaBuildInfo = @import("lambdabuild.zig").BuildInfo;
 ///     const exe = b.addExecutable(.{ ... });
 ///     b.installArtifact(exe);
 ///
-///     // Configure Lambda build and get deployment info
-///     const lambda = try lambda_zig.configureBuild(b, lambda_zig_dep, exe, .{
-///         .default_function_name = "my-function",
-///     });
-///
-///     // Use lambda.deploy_output in other steps that need the ARN
-///     const my_step = b.addRunArtifact(my_tool);
-///     my_step.addFileArg(lambda.deploy_output);
-///     my_step.step.dependOn(lambda.deploy_step);  // Ensure deploy runs first
+///     _ = try lambda_zig.configureBuild(b, lambda_zig_dep, exe, .{});
 /// }
+/// ```
+///
+/// ### Inline Configuration
+///
+/// ```zig
+/// _ = try lambda_zig.configureBuild(b, lambda_zig_dep, exe, .{
+///     .lambda_config = .{ .config = .{
+///         .role_name = "my_custom_role",
+///         .timeout = 30,
+///         .memory_size = 512,
+///         .allow_principal = "alexa-appkit.amazon.com",
+///     }},
+/// });
+/// ```
+///
+/// ### Custom Config File Path (required by default)
+///
+/// ```zig
+/// _ = try lambda_zig.configureBuild(b, lambda_zig_dep, exe, .{
+///     .lambda_config = .{ .file = .{ .path = b.path("deploy/production.json") } },
+/// });
+/// ```
+///
+/// ### Optional Config File (silent defaults if missing)
+///
+/// ```zig
+/// _ = try lambda_zig.configureBuild(b, lambda_zig_dep, exe, .{
+///     .lambda_config = .{ .file = .{
+///         .path = b.path("lambda.json"),
+///         .required = false,
+///     } },
+/// });
+/// ```
+///
+/// ### Dynamically Generated Config
+///
+/// ```zig
+/// const wf = b.addWriteFiles();
+/// const config_json = wf.add("lambda-config.json", generated_content);
+///
+/// _ = try lambda_zig.configureBuild(b, lambda_zig_dep, exe, .{
+///     .lambda_config = .{ .file = .{ .path = config_json } },
+/// });
+/// ```
+///
+/// ### Using Deploy Output
+///
+/// ```zig
+/// const lambda = try lambda_zig.configureBuild(b, lambda_zig_dep, exe, .{});
+///
+/// // Use lambda.deploy_output in other steps that need the ARN
+/// const my_step = b.addRunArtifact(my_tool);
+/// my_step.addFileArg(lambda.deploy_output);
+/// my_step.step.dependOn(lambda.deploy_step);  // Ensure deploy runs first
 /// ```
 pub fn configureBuild(
     b: *std.Build,
     lambda_zig_dep: *std.Build.Dependency,
     exe: *std.Build.Step.Compile,
-    config: LambdaConfig,
-) !LambdaBuildInfo {
+    options: Options,
+) !BuildInfo {
     // Get lambda_build from the lambda_zig dependency's Build context
     const lambda_build_dep = lambda_zig_dep.builder.dependency("lambda_build", .{
         .target = b.graph.host,
         .optimize = .ReleaseSafe,
     });
-    return @import("lambdabuild.zig").configureBuild(b, lambda_build_dep, exe, config);
+    return lambdabuild.configureBuild(b, lambda_build_dep, exe, options);
 }

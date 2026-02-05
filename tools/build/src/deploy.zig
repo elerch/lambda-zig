@@ -2,11 +2,13 @@
 //!
 //! Creates a new function or updates an existing one.
 //! Supports setting environment variables via --env or --env-file.
+//! Function configuration (timeout, memory, VPC, etc.) comes from --config-file.
 
 const std = @import("std");
 const aws = @import("aws");
 const iam_cmd = @import("iam.zig");
 const RunOptions = @import("main.zig").RunOptions;
+const LambdaBuildConfig = @import("LambdaBuildConfig.zig");
 
 // Get Lambda EnvironmentVariableKeyValue type from AWS SDK
 const EnvVar = aws.services.lambda.EnvironmentVariableKeyValue;
@@ -15,10 +17,10 @@ pub fn run(args: []const []const u8, options: RunOptions) !void {
     var function_name: ?[]const u8 = null;
     var zip_file: ?[]const u8 = null;
     var role_arn: ?[]const u8 = null;
-    var role_name: []const u8 = "lambda_basic_execution";
     var arch: ?[]const u8 = null;
-    var allow_principal: ?[]const u8 = null;
     var deploy_output: ?[]const u8 = null;
+    var config_file: ?[]const u8 = null;
+    var is_config_required = false;
 
     // Environment variables storage
     var env_vars = std.StringHashMap([]const u8).init(options.allocator);
@@ -46,10 +48,6 @@ pub fn run(args: []const []const u8, options: RunOptions) !void {
             i += 1;
             if (i >= args.len) return error.MissingRoleArn;
             role_arn = args[i];
-        } else if (std.mem.eql(u8, arg, "--role-name")) {
-            i += 1;
-            if (i >= args.len) return error.MissingRoleName;
-            role_name = args[i];
         } else if (std.mem.eql(u8, arg, "--arch")) {
             i += 1;
             if (i >= args.len) return error.MissingArch;
@@ -62,10 +60,16 @@ pub fn run(args: []const []const u8, options: RunOptions) !void {
             i += 1;
             if (i >= args.len) return error.MissingEnvFile;
             try loadEnvFile(args[i], &env_vars, options.allocator);
-        } else if (std.mem.eql(u8, arg, "--allow-principal")) {
+        } else if (std.mem.eql(u8, arg, "--config-file")) {
             i += 1;
-            if (i >= args.len) return error.MissingAllowPrincipal;
-            allow_principal = args[i];
+            if (i >= args.len) return error.MissingConfigFile;
+            config_file = args[i];
+            is_config_required = true;
+        } else if (std.mem.eql(u8, arg, "--config-file-optional")) {
+            i += 1;
+            if (i >= args.len) return error.MissingConfigFile;
+            config_file = args[i];
+            is_config_required = false;
         } else if (std.mem.eql(u8, arg, "--deploy-output")) {
             i += 1;
             if (i >= args.len) return error.MissingDeployOutput;
@@ -95,15 +99,21 @@ pub fn run(args: []const []const u8, options: RunOptions) !void {
         return error.MissingZipFile;
     }
 
+    // Load config file if provided
+    var parsed_config = if (config_file) |path|
+        try LambdaBuildConfig.loadFromFile(options.allocator, path, !is_config_required)
+    else
+        null;
+    defer if (parsed_config) |*pc| pc.deinit();
+
     try deployFunction(.{
         .function_name = function_name.?,
         .zip_file = zip_file.?,
         .role_arn = role_arn,
-        .role_name = role_name,
         .arch = arch,
         .env_vars = if (env_vars.count() > 0) &env_vars else null,
-        .allow_principal = allow_principal,
         .deploy_output = deploy_output,
+        .config = if (parsed_config) |pc| &pc.parsed.value else null,
     }, options);
 }
 
@@ -189,17 +199,27 @@ fn printHelp(writer: anytype) void {
         \\Deploy a Lambda function to AWS.
         \\
         \\Options:
-        \\  --function-name <name>  Name of the Lambda function (required)
-        \\  --zip-file <path>       Path to the deployment zip (required)
-        \\  --role-arn <arn>        IAM role ARN (optional - creates role if omitted)
-        \\  --role-name <name>      IAM role name if creating (default: lambda_basic_execution)
-        \\  --arch <arch>           Architecture: x86_64 or aarch64 (default: x86_64)
-        \\  --env <KEY=VALUE>       Set environment variable (can be repeated)
-        \\  --env-file <path>       Load environment variables from file (KEY=VALUE format)
-        \\  --allow-principal <p>   Grant invoke permission to AWS service principal
-        \\                          (e.g., alexa-appkit.amazon.com)
-        \\  --deploy-output <path>  Write deployment info (ARN, region, etc.) to JSON file
-        \\  --help, -h              Show this help message
+        \\  --function-name <name>         Name of the Lambda function (required)
+        \\  --zip-file <path>              Path to the deployment zip (required)
+        \\  --role-arn <arn>               IAM role ARN (optional - creates role if omitted)
+        \\  --arch <arch>                  Architecture: x86_64 or aarch64 (default: x86_64)
+        \\  --env <KEY=VALUE>              Set environment variable (can be repeated)
+        \\  --env-file <path>              Load environment variables from file
+        \\  --config-file <path>           Path to JSON config file (required, error if missing)
+        \\  --config-file-optional <path>  Path to JSON config file (optional, use defaults if missing)
+        \\  --deploy-output <path>         Write deployment info to JSON file
+        \\  --help, -h                     Show this help message
+        \\
+        \\Config File:
+        \\  The config file specifies function settings:
+        \\  {{
+        \\    "role_name": "my_lambda_role",
+        \\    "timeout": 30,
+        \\    "memory_size": 512,
+        \\    "allow_principal": "alexa-appkit.amazon.com",
+        \\    "description": "My function",
+        \\    "tags": [{{ "key": "Env", "value": "prod" }}]
+        \\  }}
         \\
         \\Environment File Format:
         \\  The --env-file option reads a file with KEY=VALUE pairs, one per line.
@@ -220,11 +240,10 @@ const DeployOptions = struct {
     function_name: []const u8,
     zip_file: []const u8,
     role_arn: ?[]const u8,
-    role_name: []const u8,
     arch: ?[]const u8,
     env_vars: ?*const std.StringHashMap([]const u8),
-    allow_principal: ?[]const u8,
     deploy_output: ?[]const u8,
+    config: ?*const LambdaBuildConfig,
 };
 
 fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
@@ -234,11 +253,14 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
         return error.InvalidArchitecture;
     }
 
+    // Get role_name from config or use default
+    const role_name = if (deploy_opts.config) |c| c.role_name else "lambda_basic_execution";
+
     // Get or create IAM role if not provided
     const role_arn = if (deploy_opts.role_arn) |r|
         try options.allocator.dupe(u8, r)
     else
-        try iam_cmd.getOrCreateRole(deploy_opts.role_name, options);
+        try iam_cmd.getOrCreateRole(role_name, options);
 
     defer options.allocator.free(role_arn);
 
@@ -276,6 +298,58 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
         options.allocator.free(vars);
     };
 
+    // Build config-based parameters
+    const config = deploy_opts.config;
+
+    // Build tags array if present in config
+    const tags = if (config) |c| if (c.tags) |t| blk: {
+        var tag_arr = try options.allocator.alloc(aws.services.lambda.TagKeyValue, t.len);
+        for (t, 0..) |tag, idx| {
+            tag_arr[idx] = .{ .key = tag.key, .value = tag.value };
+        }
+        break :blk tag_arr;
+    } else null else null;
+    defer if (tags) |t| options.allocator.free(t);
+
+    // Build VPC config if present
+    const vpc_config: ?aws.services.lambda.VpcConfig = if (config) |c| if (c.vpc_config) |vc|
+        .{
+            .subnet_ids = if (vc.subnet_ids) |ids| @constCast(ids) else null,
+            .security_group_ids = if (vc.security_group_ids) |ids| @constCast(ids) else null,
+            .ipv6_allowed_for_dual_stack = vc.ipv6_allowed_for_dual_stack,
+        }
+    else
+        null else null;
+
+    // Build dead letter config if present
+    const dead_letter_config: ?aws.services.lambda.DeadLetterConfig = if (config) |c| if (c.dead_letter_config) |dlc|
+        .{ .target_arn = dlc.target_arn }
+    else
+        null else null;
+
+    // Build tracing config if present
+    const tracing_config: ?aws.services.lambda.TracingConfig = if (config) |c| if (c.tracing_config) |tc|
+        .{ .mode = tc.mode }
+    else
+        null else null;
+
+    // Build ephemeral storage if present
+    const ephemeral_storage: ?aws.services.lambda.EphemeralStorage = if (config) |c| if (c.ephemeral_storage) |es|
+        .{ .size = es.size }
+    else
+        null else null;
+
+    // Build logging config if present
+    const logging_config: ?aws.services.lambda.LoggingConfig = if (config) |c| if (c.logging_config) |lc|
+        .{
+            .log_format = lc.log_format,
+            .application_log_level = lc.application_log_level,
+            .system_log_level = lc.system_log_level,
+            .log_group = lc.log_group,
+        }
+    else
+        null else null;
+
     // Try to create the function first - if it already exists, we'll update it
     std.log.info("Attempting to create function: {s}", .{deploy_opts.function_name});
 
@@ -304,6 +378,18 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
         .runtime = "provided.al2023",
         .role = role_arn,
         .environment = if (env_variables) |vars| .{ .variables = vars } else null,
+        // Config-based parameters
+        .description = if (config) |c| c.description else null,
+        .timeout = if (config) |c| c.timeout else null,
+        .memory_size = if (config) |c| c.memory_size else null,
+        .kmskey_arn = if (config) |c| c.kmskey_arn else null,
+        .vpc_config = vpc_config,
+        .dead_letter_config = dead_letter_config,
+        .tracing_config = tracing_config,
+        .ephemeral_storage = ephemeral_storage,
+        .logging_config = logging_config,
+        .tags = tags,
+        .layers = if (config) |c| if (c.layers) |l| @constCast(l) else null else null,
     }, create_options) catch |err| {
         defer create_diagnostics.deinit();
 
@@ -328,20 +414,23 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
             // Wait for function to be ready before updating configuration
             try waitForFunctionReady(deploy_opts.function_name, options);
 
-            // Update environment variables if provided
-            if (env_variables) |vars| {
-                try updateFunctionConfiguration(deploy_opts.function_name, vars, options);
-            }
+            // Update function configuration if we have config or env variables
+            if (config != null or env_variables != null)
+                try updateFunctionConfiguration(
+                    deploy_opts.function_name,
+                    env_variables,
+                    config,
+                    options,
+                );
 
             // Add invoke permission if requested
-            if (deploy_opts.allow_principal) |principal| {
-                try addPermission(deploy_opts.function_name, principal, options);
-            }
+            if (config) |c|
+                if (c.allow_principal) |principal|
+                    try addPermission(deploy_opts.function_name, principal, options);
 
             // Write deploy output if requested
-            if (deploy_opts.deploy_output) |output_path| {
+            if (deploy_opts.deploy_output) |output_path|
                 try writeDeployOutput(output_path, function_arn.?, role_arn, lambda_arch, deploy_opts.env_vars);
-            }
 
             return;
         }
@@ -364,14 +453,13 @@ fn deployFunction(deploy_opts: DeployOptions, options: RunOptions) !void {
     try waitForFunctionReady(deploy_opts.function_name, options);
 
     // Add invoke permission if requested
-    if (deploy_opts.allow_principal) |principal| {
-        try addPermission(deploy_opts.function_name, principal, options);
-    }
+    if (config) |c|
+        if (c.allow_principal) |principal|
+            try addPermission(deploy_opts.function_name, principal, options);
 
     // Write deploy output if requested
-    if (deploy_opts.deploy_output) |output_path| {
+    if (deploy_opts.deploy_output) |output_path|
         try writeDeployOutput(output_path, function_arn.?, role_arn, lambda_arch, deploy_opts.env_vars);
-    }
 }
 
 /// Build environment variables in the format expected by AWS Lambda API
@@ -398,23 +486,74 @@ fn buildEnvVariables(
     return result;
 }
 
-/// Update function configuration (environment variables)
+/// Update function configuration (environment variables and config settings)
 fn updateFunctionConfiguration(
     function_name: []const u8,
-    env_variables: []EnvVar,
+    env_variables: ?[]EnvVar,
+    config: ?*const LambdaBuildConfig,
     options: RunOptions,
 ) !void {
     const services = aws.Services(.{.lambda}){};
 
     std.log.info("Updating function configuration for: {s}", .{function_name});
 
+    // Build VPC config if present
+    const vpc_config: ?aws.services.lambda.VpcConfig = if (config) |c| if (c.vpc_config) |vc|
+        .{
+            .subnet_ids = if (vc.subnet_ids) |ids| @constCast(ids) else null,
+            .security_group_ids = if (vc.security_group_ids) |ids| @constCast(ids) else null,
+            .ipv6_allowed_for_dual_stack = vc.ipv6_allowed_for_dual_stack,
+        }
+    else
+        null else null;
+
+    // Build dead letter config if present
+    const dead_letter_config: ?aws.services.lambda.DeadLetterConfig = if (config) |c| if (c.dead_letter_config) |dlc|
+        .{ .target_arn = dlc.target_arn }
+    else
+        null else null;
+
+    // Build tracing config if present
+    const tracing_config: ?aws.services.lambda.TracingConfig = if (config) |c| if (c.tracing_config) |tc|
+        .{ .mode = tc.mode }
+    else
+        null else null;
+
+    // Build ephemeral storage if present
+    const ephemeral_storage: ?aws.services.lambda.EphemeralStorage = if (config) |c| if (c.ephemeral_storage) |es|
+        .{ .size = es.size }
+    else
+        null else null;
+
+    // Build logging config if present
+    const logging_config: ?aws.services.lambda.LoggingConfig = if (config) |c| if (c.logging_config) |lc|
+        .{
+            .log_format = lc.log_format,
+            .application_log_level = lc.application_log_level,
+            .system_log_level = lc.system_log_level,
+            .log_group = lc.log_group,
+        }
+    else
+        null else null;
+
     const update_config_result = try aws.Request(services.lambda.update_function_configuration).call(.{
         .function_name = function_name,
-        .environment = .{ .variables = env_variables },
+        .environment = if (env_variables) |vars| .{ .variables = vars } else null,
+        // Config-based parameters
+        .description = if (config) |c| c.description else null,
+        .timeout = if (config) |c| c.timeout else null,
+        .memory_size = if (config) |c| c.memory_size else null,
+        .kmskey_arn = if (config) |c| c.kmskey_arn else null,
+        .vpc_config = vpc_config,
+        .dead_letter_config = dead_letter_config,
+        .tracing_config = tracing_config,
+        .ephemeral_storage = ephemeral_storage,
+        .logging_config = logging_config,
+        .layers = if (config) |c| if (c.layers) |l| @constCast(l) else null else null,
     }, options.aws_options);
     defer update_config_result.deinit();
 
-    try options.stdout.print("Updated environment variables\n", .{});
+    try options.stdout.print("Updated function configuration\n", .{});
     try options.stdout.flush();
 
     // Wait for configuration update to complete
@@ -437,21 +576,17 @@ fn waitForFunctionReady(function_name: []const u8, options: RunOptions) !void {
         defer result.deinit();
 
         // Check if function is ready
-        if (result.response.configuration) |config| {
-            if (config.last_update_status) |status| {
+        if (result.response.configuration) |cfg| {
+            if (cfg.last_update_status) |status| {
                 if (std.mem.eql(u8, status, "Successful")) {
-                    std.log.info("Function is ready", .{});
+                    std.log.debug("Function is ready", .{});
                     return;
                 } else if (std.mem.eql(u8, status, "Failed")) {
                     return error.FunctionUpdateFailed;
                 }
                 // "InProgress" - keep waiting
-            } else {
-                return; // No status means it's ready
-            }
-        } else {
-            return; // No configuration means we can't check, assume ready
-        }
+            } else return; // No status means it's ready
+        } else return; // No configuration means we can't check, assume ready
 
         std.Thread.sleep(200 * std.time.ns_per_ms);
     }
@@ -544,7 +679,7 @@ fn writeDeployOutput(
     const region = arn_parts.next() orelse return error.InvalidArn;
     const account_id = arn_parts.next() orelse return error.InvalidArn;
     _ = arn_parts.next(); // function
-    const function_name = arn_parts.next() orelse return error.InvalidArn;
+    const fn_name = arn_parts.next() orelse return error.InvalidArn;
 
     const file = try std.fs.cwd().createFile(output_path, .{});
     defer file.close();
@@ -564,7 +699,7 @@ fn writeDeployOutput(
         \\  "role_arn": "{s}",
         \\  "architecture": "{s}",
         \\  "environment_keys": [
-    , .{ function_arn, function_name, partition, region, account_id, role_arn, architecture });
+    , .{ function_arn, fn_name, partition, region, account_id, role_arn, architecture });
 
     // Write environment variable keys
     if (env_vars) |vars| {

@@ -4,8 +4,8 @@
     .fingerprint = 0x6e61de08e7e51114,
     .dependencies = .{
         .aws = .{
-            .url = "git+https://git.lerch.org/lobo/aws-sdk-for-zig#5c7aed071f6251d53a1627080a21d604ff58f0a5",
-            .hash = "aws-0.0.1-SbsFcFE7CgDBilPa15i4gIB6Qr5ozBz328O63abDQDDk",
+            .url = "git+https://git.lerch.org/lobo/aws-sdk-for-zig#1a03250fbeb2840ab8b6010f1ad4e899cdfc185a",
+            .hash = "aws-0.0.1-SbsFcCg7CgC0yYv2Y7aOjonSAU3mltOSfY0x2w9jZlMV",
         },
     },
     .paths = .{

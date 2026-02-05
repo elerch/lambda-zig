@@ -17,15 +17,163 @@ Build options:
 * **payload**: JSON payload for function invocation (used with awslambda_run)
 * **region**: AWS region for deployment and invocation
 * **profile**: AWS profile to use for credentials
-* **role-name**: IAM role name for the function (default: lambda_basic_execution)
 * **env-file**: Path to environment variables file for the Lambda function
-* **allow-principal**: AWS service principal to grant invoke permission (e.g., alexa-appkit.amazon.com)
+* **config-file**: Path to lambda.json configuration file (overrides build.zig settings)
 
 The Lambda function can be compiled for x86_64 or aarch64. The build system
 automatically configures the Lambda architecture based on the target.
 
 A sample project using this runtime can be found at
 https://git.lerch.org/lobo/lambda-zig-sample
+
+Lambda Configuration
+--------------------
+
+Lambda functions can be configured via a `lambda.json` file or inline in `build.zig`.
+The configuration controls IAM roles, function settings, and deployment options.
+
+### Configuration File (lambda.json)
+
+By default, the build system looks for an optional `lambda.json` file in your project root.
+If found, it will use these settings for deployment.
+
+```json
+{
+  "role_name": "my_lambda_role",
+  "timeout": 30,
+  "memory_size": 512,
+  "description": "My Lambda function",
+  "allow_principal": "alexa-appkit.amazon.com",
+  "tags": [
+    { "key": "Environment", "value": "production" },
+    { "key": "Project", "value": "my-project" }
+  ]
+}
+```
+
+### Available Configuration Options
+
+Many of these configuration options are from the Lambda [CreateFunction](https://docs.aws.amazon.com/lambda/latest/api/API_CreateFunction.html#API_CreateFunction_RequestBody)
+API call and more details are available there.
+
+
+| Option               | Type     | Default                    | Description                                 |
+|----------------------|----------|----------------------------|---------------------------------------------|
+| `role_name`          | string   | `"lambda_basic_execution"` | IAM role name for the function              |
+| `timeout`            | integer  | AWS default (3)            | Execution timeout in seconds (1-900)        |
+| `memory_size`        | integer  | AWS default (128)          | Memory allocation in MB (128-10240)         |
+| `description`        | string   | null                       | Human-readable function description         |
+| `allow_principal`    | string   | null                       | AWS service principal for invoke permission |
+| `kmskey_arn`         | string   | null                       | KMS key ARN for environment encryption      |
+| `layers`             | string[] | null                       | Lambda layer ARNs to attach                 |
+| `tags`               | Tag[]    | null                       | Resource tags (array of `{key, value}`)     |
+| `vpc_config`         | object   | null                       | VPC configuration (see below)               |
+| `dead_letter_config` | object   | null                       | Dead letter queue configuration             |
+| `tracing_config`     | object   | null                       | X-Ray tracing configuration                 |
+| `ephemeral_storage`  | object   | AWS default (512)          | Ephemeral storage configuration             |
+| `logging_config`     | object   | null                       | CloudWatch logging configuration            |
+
+### VPC Configuration
+
+```json
+{
+  "vpc_config": {
+    "subnet_ids": ["subnet-12345", "subnet-67890"],
+    "security_group_ids": ["sg-12345"],
+    "ipv6_allowed_for_dual_stack": false
+  }
+}
+```
+
+### Tracing Configuration
+
+```json
+{
+  "tracing_config": {
+    "mode": "Active"
+  }
+}
+```
+
+Mode must be `"Active"` or `"PassThrough"`.
+
+### Logging Configuration
+
+```json
+{
+  "logging_config": {
+    "log_format": "JSON",
+    "application_log_level": "INFO",
+    "system_log_level": "WARN",
+    "log_group": "/aws/lambda/my-function"
+  }
+}
+```
+
+Log format must be `"JSON"` or `"Text"`.
+
+### Ephemeral Storage
+
+```json
+{
+  "ephemeral_storage": {
+    "size": 512
+  }
+}
+```
+
+Size must be between 512-10240 MB.
+
+### Dead Letter Configuration
+
+```json
+{
+  "dead_letter_config": {
+    "target_arn": "arn:aws:sqs:us-east-1:123456789:my-dlq"
+  }
+}
+```
+
+### Build Integration Options
+
+You can also configure Lambda settings directly in `build.zig`:
+
+```zig
+// Use a specific config file (required - fails if missing)
+_ = try lambda.configureBuild(b, dep, exe, .{
+    .lambda_config = .{ .file = .{
+        .path = b.path("deploy/lambda.json"),
+        .required = true,
+    }},
+});
+
+// Use inline configuration
+_ = try lambda.configureBuild(b, dep, exe, .{
+    .lambda_config = .{ .config = .{
+        .role_name = "my_role",
+        .timeout = 30,
+        .memory_size = 512,
+        .description = "My function",
+    }},
+});
+
+// Disable config file lookup entirely
+_ = try lambda.configureBuild(b, dep, exe, .{
+    .lambda_config = .none,
+});
+```
+
+### Overriding Config at Build Time
+
+The `-Dconfig-file` build option overrides the `build.zig` configuration:
+
+```sh
+# Use a different config file for staging
+zig build awslambda_deploy -Dconfig-file=lambda-staging.json
+
+# Use production config
+zig build awslambda_deploy -Dconfig-file=deploy/lambda-prod.json
+```
 
 Environment Variables
 ---------------------
@@ -81,24 +229,21 @@ Lambda functions can be configured to allow invocation by AWS service principals
 This is required for services like Alexa Skills Kit, API Gateway, or S3 to trigger
 your Lambda function.
 
-### Using the build system
+### Using lambda.json (Recommended)
 
-Pass the `-Dallow-principal` option to grant invoke permission to a service:
+Add `allow_principal` to your configuration file:
 
-```sh
-# Allow Alexa Skills Kit to invoke the function
-zig build awslambda_deploy -Dfunction-name=my-skill -Dallow-principal=alexa-appkit.amazon.com
-
-# Allow API Gateway to invoke the function
-zig build awslambda_deploy -Dfunction-name=my-api -Dallow-principal=apigateway.amazonaws.com
+```json
+{
+  "allow_principal": "alexa-appkit.amazon.com"
+}
 ```
 
-### Using the CLI directly
-
-```sh
-./lambda-build deploy --function-name my-fn --zip-file function.zip \
-    --allow-principal alexa-appkit.amazon.com
-```
+Common service principals:
+- `alexa-appkit.amazon.com` - Alexa Skills Kit
+- `apigateway.amazonaws.com` - API Gateway
+- `s3.amazonaws.com` - S3 event notifications
+- `events.amazonaws.com` - EventBridge/CloudWatch Events
 
 The permission is idempotent - if it already exists, the deployment will continue
 successfully.
