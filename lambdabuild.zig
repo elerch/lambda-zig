@@ -149,7 +149,7 @@ pub fn configureBuild(
     ) orelse options.default_env_file;
     const config_file_override = b.option(
         []const u8,
-        "config-file",
+        "awslambda-config-file",
         "Path to Lambda build config JSON file (overrides function_config)",
     );
 
